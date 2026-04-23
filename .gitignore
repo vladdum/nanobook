@@ -1,0 +1,56 @@
+# Vivado build artifacts
+build/
+.Xil/
+*.jou
+*.log
+*.str
+*.rpt
+*.pb
+*.wdb
+vivado_pid*.str
+*.xpr
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+
+# Auto-generated build SHA include (populated by synth.tcl)
+hw/synth/build_sha.vh
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# cocotb / Verilator
+sim_build/
+results.xml
+obj_dir/
+
+# C++ build output
+*.o
+*.so
+*.a
+cmake-build-*/
+
+# Pcap binaries (fetched, never committed)
+data/pcaps/*.pcap
+data/pcaps/*.gz
+data/pcaps/*.NASDAQ_ITCH50
+
+# Local planning scratch (roadmap + per-month plans live here, local-only)
+docs/superpowers/
+
+# Claude Code local data (worktrees, memory — never committed)
+.claude/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

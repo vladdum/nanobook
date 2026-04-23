@@ -1,0 +1,44 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hw/**'
+  pull_request:
+    paths:
+      - 'hw/**'
+
+jobs:
+  verilator-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache Verilator 5.020
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-5.020-ubuntu-latest
+
+      - name: Build Verilator 5.020
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison ccache libfl2 libfl-dev zlib1g zlib1g-dev
+          git clone --depth=1 --branch v5.020 https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure --prefix=/opt/verilator
+          make -j$(nproc) && sudo make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+
+      - name: Verilator version
+        run: verilator --version
+
+      - name: Lint
+        run: make lint
