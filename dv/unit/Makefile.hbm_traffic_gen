@@ -1,0 +1,6 @@
+SIM ?= verilator
+TOPLEVEL_LANG ?= verilog
+VERILOG_SOURCES = $(shell pwd)/../../hw/ip/hbm_wrapper/hbm_traffic_gen.sv
+TOPLEVEL = hbm_traffic_gen
+MODULE = hbm_traffic_gen_tb
+include $(shell cocotb-config --makefiles)/Makefile.sim

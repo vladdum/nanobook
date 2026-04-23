@@ -1,0 +1,6 @@
+SIM ?= verilator
+TOPLEVEL_LANG ?= verilog
+VERILOG_SOURCES = $(shell pwd)/../../hw/ip/eth10g_wrapper/eth10g_loopback.sv
+TOPLEVEL = eth10g_loopback
+MODULE = eth10g_loopback_tb
+include $(shell cocotb-config --makefiles)/Makefile.sim

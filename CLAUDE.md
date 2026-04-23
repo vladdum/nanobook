@@ -81,10 +81,10 @@ implementation plans live at `docs/superpowers/plans/` (gitignored, local-only).
 
 ## Build Commands
 
-All builds run under WSL/Linux (not native Windows). Vivado 2024.2+ must be on PATH (add to `~/.bashrc`):
+All builds run under WSL/Linux (not native Windows). Vivado 2025.2+ must be on PATH (add to `~/.bashrc`):
 
 ```bash
-source /opt/Xilinx/2024.2/Vivado/settings64.sh
+source /opt/Xilinx/2025.2/Vivado/settings64.sh
 ```
 
 Top-level Make targets:

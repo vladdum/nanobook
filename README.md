@@ -80,11 +80,11 @@ All build commands below should be run inside the WSL/Ubuntu terminal.
 - **Alveo U50 (XCU50)** — seated in a PCIe Gen3 x16 slot with aux 6-pin power and a blower
   shroud for airflow. See `docs/host-spec.md` (populated during M1 Task 2) for the pinned host
   configuration.
-- **[Vivado ML Standard 2024.2+](https://www.xilinx.com/products/design-tools/vivado.html)**
+- **[Vivado ML Standard 2025.2+](https://www.xilinx.com/products/design-tools/vivado.html)**
   with Alveo device support. Source in `~/.bashrc`:
 
   ```bash
-  source /opt/Xilinx/2024.2/Vivado/settings64.sh
+  source /opt/Xilinx/2025.2/Vivado/settings64.sh
   ```
 
 - **[Xilinx Runtime (XRT)](https://xilinx.github.io/XRT/master/html/index.html)** matched to

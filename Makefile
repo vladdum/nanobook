@@ -30,18 +30,15 @@ lint:
 	 else echo "lint: no RTL yet (M1 Tasks 5/6)"; fi
 
 fetch-pcaps:
-	@if [ -x data/pcaps/fetch.sh ]; then bash data/pcaps/fetch.sh; \
-	 else echo "data/pcaps/fetch.sh missing — implement M1 Task 13 first"; exit 1; fi
+	bash data/pcaps/fetch.sh
 
 verify-pcaps:
-	@if [ ! -f data/pcaps/checksums.sha256 ]; then \
-	    echo "data/pcaps/checksums.sha256 missing — implement M1 Task 13 first"; exit 1; fi
 	cd data/pcaps && sha256sum --check checksums.sha256
 
 gen-ber-pcap:
-	mkdir -p dv/integration/data
-	python3 -c "from scapy.all import Ether, wrpcap; \
-frames = [Ether(src='02:00:00:00:01:01', dst='02:00:00:00:01:02') / (bytes(range(256))*5) \
+	python3 -c "\
+from scapy.all import Ether, wrpcap; \
+frames = [Ether(src='02:00:00:00:01:01', dst='02:00:00:00:01:02') / bytes(range(256))*5 \
           for _ in range(100000)]; \
 wrpcap('dv/integration/data/ber_frames.pcap', frames)"
 
