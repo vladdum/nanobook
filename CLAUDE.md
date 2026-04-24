@@ -38,12 +38,16 @@ Sequential dependencies to respect:
 
 Do not include `Co-Authored-By` trailers in commit messages.
 
+Direct commits and pushes to `main` are forbidden. All changes must go through a PR.
+A pre-push hook in `.git/hooks/pre-push` enforces this locally. GitHub branch protection
+requires Pro for private repos — re-enable via `gh api` if the repo is made public.
+
 ## Pull Requests
 
 Do not include any reference to Claude or AI tools in PR titles, bodies, or descriptions
 (no `🤖 Generated with Claude Code`, no `Co-Authored-By`, no similar footers).
 
-Before creating any PR:
+Before creating a PR or pushing to an existing PR branch:
 
 1. Squash all commits on the branch into a single commit.
 2. Rebase on main:
