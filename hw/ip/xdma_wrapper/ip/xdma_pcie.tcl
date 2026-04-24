@@ -5,7 +5,7 @@ create_ip -name xdma -vendor xilinx.com -library ip \
 set_property -dict [list \
   CONFIG.mode_selection {Advanced} \
   CONFIG.pl_link_cap_max_link_speed {8.0_GT/s} \
-  CONFIG.pl_link_cap_max_link_width {X16} \
+  CONFIG.pl_link_cap_max_link_width {X4} \
   CONFIG.axi_data_width {256_bit} \
   CONFIG.axilite_master_en {true} \
   CONFIG.axilite_master_size {64} \

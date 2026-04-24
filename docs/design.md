@@ -329,8 +329,8 @@ BAR0, 64 KB. 32-bit registers unless noted.
 | --- | --- | --- | --- |
 | `0x0000` | `ID` | R | Fixed magic `0x4E414E4F` ("NANO") |
 | `0x0004` | `VERSION` | R | `{major[15:0], minor[15:0]}` |
-| `0x0010` | `CONTROL` | RW | Bit 0 = enable, bit 1 = reset, bit 2 = pause |
-| `0x0014` | `STATUS` | R | Pipeline health bits (HBM ready, 10G ready, stall flags, CDC overflows) |
+| `0x0010` | `CONTROL` | RW | See CONTROL bit table below |
+| `0x0014` | `STATUS` | R | See STATUS bit table below |
 | `0x0020` | `GIT_SHA_LO` | R | Low 32 bits of HEAD commit SHA baked at synthesis |
 | `0x0024` | `GIT_SHA_HI` | R | High 32 bits of HEAD commit SHA |
 | `0x0028` | `SYMBOL_MAP_ADDR` | RW | HBM pointer to stock_locate → sym_idx table (populated M6+) |
@@ -340,6 +340,41 @@ BAR0, 64 KB. 32-bit registers unless noted.
 | `0x0208` | `TOB_RING_HEAD` | RW | Host-updated consumer head |
 | `0x020C` | `TOB_RING_TAIL` | R | FPGA-updated producer tail |
 | `0x0300` | `CLOCK_NS` | R | Free-running 48-bit timestamp counter (low / high split) |
+
+**CONTROL bits (0x0010, RW, 7 bits implemented):**
+
+| Bit | Name | Description |
+| --- | --- | --- |
+| `[0]` | `ENABLE` | Pipeline enable |
+| `[1]` | `RESET` | Pipeline reset (active high) |
+| `[2]` | `PAUSE` | Pipeline pause |
+| `[3]` | `LED0` | GPIO LED 0 (diagnostic) |
+| `[4]` | `HBM_SMOKE_GO / LED1` | Trigger HBM smoke test; also drives LED 1 |
+| `[5]` | `LED2` | GPIO LED 2 (diagnostic) |
+| `[6]` | `LED3` | GPIO LED 3 (no physical pin on U50; silently dropped) |
+
+**STATUS bits (0x0014, R):**
+
+| Bit | Name | Description |
+| --- | --- | --- |
+| `[0]` | `HBM_READY` | HBM IP APB initialisation complete |
+| `[1]` | `ETH10G_READY` | 10G PHY `rx_block_lock` asserted |
+| `[7:2]` | — | Reserved, reads 0 |
+| `[8]` | `HBM_SMOKE_DONE` | Smoke test completed |
+| `[9]` | `HBM_SMOKE_ERR` | Smoke test detected any error |
+| `[31:10]` | — | Reserved, reads 0 |
+
+**U50 hardware notes (frozen at M01, do not change without a spec PR):**
+
+- QSFP management (`modsell`, `resetl`, `modprsl`, `intl`, `lpmode`) is routed via the
+  satellite controller (MSP430 / CMS), not direct FPGA I/O. These signals are not top-level
+  FPGA ports.
+- `hbm_cattrip` (J18, LVCMOS18) must be driven low at all times. Driving it high signals
+  catastrophic over-temperature and forces a board power-off; Vivado DRC PPURQ-1 enforces this.
+- HBM reference clock source: 100 MHz board oscillator at BB18/BC18 (LVDS). The same clock
+  as Corundum's `clk_100mhz_1`.
+- U50 exposes exactly 3 user LEDs: E18 (act), E16 (stat\_g), F17 (stat\_y). `gpio_led` is
+  `[2:0]` in RTL.
 
 ### 5.2 DMA ring format
 

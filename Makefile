@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 VIVADO ?= vivado
 
-.PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap clean
+.PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap clean clean-all
 
 help:
 	@echo "Nanobook — available targets:"
@@ -43,4 +43,9 @@ frames = [Ether(src='02:00:00:00:01:01', dst='02:00:00:00:01:02') / bytes(range(
 wrpcap('dv/integration/data/ber_frames.pcap', frames)"
 
 clean:
+	$(MAKE) -C hw/synth clean
 	rm -rf build .Xil *.jou *.log *.str
+
+clean-all: clean
+	find hw/ip -name "*.xci" -delete
+	rm -f data/pcaps/*.gz
