@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run markdownlint on staged .md files before commit.
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
+[[ -z "$staged" ]] && exit 0
+
+echo "markdownlint: checking staged .md files..."
+npx markdownlint-cli2 $staged

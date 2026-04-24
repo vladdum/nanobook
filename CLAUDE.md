@@ -38,9 +38,26 @@ Sequential dependencies to respect:
 
 Do not include `Co-Authored-By` trailers in commit messages.
 
+Commits must follow the conventional commit format: `<type>[(scope)]: <description>`.
+Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `perf`, `revert`.
+
 Direct commits and pushes to `main` are forbidden. All changes must go through a PR.
-A pre-push hook in `.git/hooks/pre-push` enforces this locally. GitHub branch protection
-requires Pro for private repos — re-enable via `gh api` if the repo is made public.
+GitHub branch protection requires Pro for private repos — re-enable via `gh api` if the
+repo is made public.
+
+## Git Hooks
+
+Hooks live in `.githooks/` (tracked). Activate after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Hooks enforce: no direct push to `main` (pre-push), markdownlint on staged `.md` files
+(pre-commit), conventional commit format (commit-msg).
+
+**`--no-verify` is emergency-only** (e.g., repairing a stray commit on `main`). Never use
+it to skip hooks during normal development.
 
 ## Pull Requests
 
