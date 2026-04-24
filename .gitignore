@@ -60,3 +60,13 @@ docs/superpowers/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Refbook (C++17 library + pybind11 wrapper)
+sw/refbook/build/
+sw/refbook/_skbuild/
+sw/refbook/dist/
+*.gcda
+*.gcno
+*.gcov
+lcov.info
+coverage_report/
