@@ -12,10 +12,10 @@ module nanobook_shell_top (
   input  wire         pcie_refclk_p,
   input  wire         pcie_refclk_n,
   input  wire         pcie_rstn,
-  input  wire  [15:0] pcie_rx_p,
-  input  wire  [15:0] pcie_rx_n,
-  output wire  [15:0] pcie_tx_p,
-  output wire  [15:0] pcie_tx_n,
+  input  wire  [3:0]  pcie_rx_p,
+  input  wire  [3:0]  pcie_rx_n,
+  output wire  [3:0]  pcie_tx_p,
+  output wire  [3:0]  pcie_tx_n,
   // HBM reference clock
   input  wire         hbm_refclk_p,
   input  wire         hbm_refclk_n,
@@ -26,13 +26,10 @@ module nanobook_shell_top (
   input  wire         qsfp0_rx_n,
   output wire         qsfp0_tx_p,
   output wire         qsfp0_tx_n,
-  output wire         qsfp0_modsell,
-  output wire         qsfp0_resetl,
-  input  wire         qsfp0_modprsl,
-  input  wire         qsfp0_intl,
-  output wire         qsfp0_lpmode,
-  // GPIO
-  output wire  [3:0]  gpio_led
+  // GPIO (U50 exposes 3 LEDs: act=E18, stat_g=E16, stat_y=F17)
+  output wire  [2:0]  gpio_led,
+  // HBM catastrophic over-temperature output (J18) — must be driven; tie low
+  output wire         hbm_cattrip
 );
 
   // -------------------------------------------------------------------------
@@ -45,7 +42,7 @@ module nanobook_shell_top (
   // Control / status wires from xdma_wrapper
   // -------------------------------------------------------------------------
   logic [2:0] control;    // lint_off: consumed by future pipeline modules
-  logic [3:0] gpio_led_int;
+  logic [3:0] gpio_led_int;  // BAR0 drives 4 bits; top only forwards [2:0] to 3 physical LEDs
 
   // 10G status
   logic eth10g_ready_sig;
@@ -95,23 +92,28 @@ module nanobook_shell_top (
   );
 
   // -------------------------------------------------------------------------
-  // GPIO LED driven by BAR0 CONTROL[6:3]
+  // GPIO LED driven by BAR0 CONTROL[6:3] — only 3 physical LEDs on U50
   // -------------------------------------------------------------------------
-  assign gpio_led = gpio_led_int;
+  assign gpio_led    = gpio_led_int[2:0];
+  assign hbm_cattrip = 1'b0;
 
   // -------------------------------------------------------------------------
-  // QSFP28 module control (static: deassert reset, normal-power, select)
+  // QSFP28 refclk: IBUFDS_GTE4 converts differential 156.25 MHz to GT refclk
   // -------------------------------------------------------------------------
-  assign qsfp0_modsell = 1'b0;
-  assign qsfp0_resetl  = 1'b1;
-  assign qsfp0_lpmode  = 1'b0;
+  wire qsfp0_refclk_gt;
+  wire qsfp0_refclk_se;
+  IBUFDS_GTE4 #(
+    .REFCLK_HROW_CK_SEL(2'b00)
+  ) u_ibufds_qsfp0 (
+    .I    (qsfp0_refclk_p),
+    .IB   (qsfp0_refclk_n),
+    .CEB  (1'b0),
+    .O    (qsfp0_refclk_gt),
+    .ODIV2(qsfp0_refclk_se)
+  );
 
   // -------------------------------------------------------------------------
   // 10G GTY wrapper + XGMII loopback
-  // NOTE: qsfp0_refclk_p is passed directly as a single-ended 156.25 MHz
-  //       clock. In a real build this pin must first go through an
-  //       IBUFDS_GTE4 to produce the single-ended reference; the Corundum
-  //       wrapper (HAS_COMMON=1) instantiates its own BUFG/PLL internally.
   // -------------------------------------------------------------------------
   logic xgmii_tx_clk;
   logic xgmii_tx_rst;
@@ -123,7 +125,7 @@ module nanobook_shell_top (
   logic  [7:0] xgmii_rxc;
 
   gty_10g_wrapper u_gty_10g (
-    .refclk        (qsfp0_refclk_p),
+    .refclk        (qsfp0_refclk_gt),
     .sys_clk       (user_clk),
     .sys_rstn      (user_rstn),
     .rx_p          (qsfp0_rx_p),

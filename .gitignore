@@ -16,6 +16,12 @@ vivado_pid*.str
 *.sim/
 *.srcs/
 
+# Vivado-generated IP directories (produced by hw/ip/*/ip/*.tcl during synth)
+hw/ip/*/ip/*/
+hw/synth/clockInfo.txt
+hw/synth/tight_setup_hold_pins.txt
+hw/synth/cong/
+
 # Auto-generated build SHA include (populated by synth.tcl)
 hw/synth/build_sha.vh
 

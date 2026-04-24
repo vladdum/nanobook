@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Fetch three pinned NASDAQ ITCH 5.0 trading days.
 # Days: 2024-10-16 (normal), 2024-09-18 (FOMC), 2024-08-05 (book-quake).
+#
+# Data source: NASDAQ TotalView-ITCH Historical Data
+#   https://www.nasdaqtrader.com/content/products/specs/ITCH_5.0_Data_Specs.pdf
+#
+# Files are available via NASDAQ's public FTP mirror.
+# Try: ftp://ftp.nasdaqtrader.com/itch/Nasdaq_ITCH/<MMDDYYYY>.NASDAQ_ITCH50.gz
+# Or download manually from the NASDAQ Trading Portal and place .gz files here.
+#
+# After placing files, update checksums:
+#   cd data/pcaps && sha256sum *.gz > checksums.sha256
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -9,7 +19,10 @@ DAYS=(
   "09182024.NASDAQ_ITCH50"
   "08052024.NASDAQ_ITCH50"
 )
-BASE_URL="https://emi.nasdaq.com/ITCH/Nasdaq_ITCH"
+BASE_URLS=(
+  "ftp://ftp.nasdaqtrader.com/itch/Nasdaq_ITCH"
+  "https://emi.nasdaq.com/ITCH/Nasdaq_ITCH"
+)
 
 for day in "${DAYS[@]}"; do
   if [[ -f "${day}.gz" ]]; then
@@ -17,7 +30,19 @@ for day in "${DAYS[@]}"; do
     continue
   fi
   echo "Fetching ${day}.gz ..."
-  curl -L -f -o "${day}.gz" "${BASE_URL}/${day}.gz"
+  fetched=false
+  for base in "${BASE_URLS[@]}"; do
+    if curl -L -f -o "${day}.gz" "${base}/${day}.gz" 2>/dev/null; then
+      fetched=true
+      break
+    fi
+    echo "  (tried ${base}, failed — trying next)"
+  done
+  if [[ "$fetched" == false ]]; then
+    echo "ERROR: Could not fetch ${day}.gz from any mirror."
+    echo "  Download manually from https://www.nasdaqtrader.com and place here."
+    exit 1
+  fi
 done
 
 # Skip verification if checksums are still placeholder zeros.

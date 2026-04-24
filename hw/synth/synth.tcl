@@ -27,17 +27,52 @@ close $f
 puts "INFO: build_sha.vh written (SHA ${SHA_HEX})"
 
 # ---------------------------------------------------------------------------
-# Project setup (in-memory — no .xpr written)
+# IP generation — source each .tcl whose .xci is missing
 # ---------------------------------------------------------------------------
 file mkdir $OUT_DIR
 
+set ip_scripts [glob -nocomplain ../ip/*/ip/*.tcl]
+set need_gen {}
+foreach tcl $ip_scripts {
+    set name [file rootname [file tail $tcl]]
+    set dir  [file dirname $tcl]
+    # eth_xcvr_gty.tcl creates eth_xcvr_gty_full + eth_xcvr_gty_channel
+    if {$name eq "eth_xcvr_gty"} {
+        if {[llength [glob -nocomplain ${dir}/eth_xcvr_gty_full/eth_xcvr_gty_full.xci]] == 0} {
+            lappend need_gen $tcl
+        }
+    } else {
+        if {[llength [glob -nocomplain ${dir}/${name}/${name}.xci]] == 0} {
+            lappend need_gen $tcl
+        }
+    }
+}
+
+if {[llength $need_gen] > 0} {
+    puts "INFO: Generating [llength $need_gen] IP(s)"
+    create_project -force -part $PART ip_gen ${OUT_DIR}/ip_gen
+    set_property target_language Verilog [current_project]
+    foreach tcl $need_gen {
+        puts "INFO: Sourcing $tcl"
+        source $tcl
+    }
+    close_project
+    puts "INFO: IP generation complete"
+} else {
+    puts "INFO: All IPs already generated"
+}
+
+# ---------------------------------------------------------------------------
+# Project setup (in-memory — no .xpr written)
+# ---------------------------------------------------------------------------
 create_project -in_memory -part $PART
 
-set_property target_language SystemVerilog [current_project]
+set_property target_language Verilog [current_project]
 
 # ---------------------------------------------------------------------------
 # Add RTL sources
 # ---------------------------------------------------------------------------
+set CORUNDUM ../../third_party/corundum/fpga
 foreach src [concat \
     [glob -nocomplain ../ip/xdma_wrapper/*.sv] \
     [glob -nocomplain ../ip/hbm_wrapper/*.sv]  \
@@ -47,26 +82,81 @@ foreach src [concat \
     read_verilog -sv $src
 }
 
+# Corundum 10G GTY PHY (Verilog 2001 — read_verilog without -sv)
+foreach src [list \
+    ${CORUNDUM}/common/rtl/eth_xcvr_phy_10g_gty_wrapper.v \
+    ${CORUNDUM}/common/rtl/eth_xcvr_phy_10g_gty_quad_wrapper.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_rx.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_rx_if.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_rx_frame_sync.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_rx_ber_mon.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_rx_watchdog.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_tx.v \
+    ${CORUNDUM}/lib/eth/rtl/eth_phy_10g_tx_if.v \
+    ${CORUNDUM}/lib/eth/rtl/xgmii_baser_dec_64.v \
+    ${CORUNDUM}/lib/eth/rtl/xgmii_baser_enc_64.v \
+    ${CORUNDUM}/lib/eth/rtl/lfsr.v \
+    ${CORUNDUM}/lib/axis/rtl/sync_reset.v \
+] {
+    if {[file exists $src]} {
+        read_verilog $src
+    } else {
+        puts "WARNING: Corundum source not found: $src"
+    }
+}
+
 # Include build_sha.vh in the include path
 set_property include_dirs [list [pwd]] [current_fileset]
 
 # ---------------------------------------------------------------------------
-# Add IPs
+# Add IPs — top-level .xci only (sub-IPs pulled in automatically)
 # ---------------------------------------------------------------------------
-foreach xci [glob -nocomplain ../ip/*/ip/*.xci] {
-    read_ip $xci
+foreach tcl [glob -nocomplain ../ip/*/ip/*.tcl] {
+    set name [file rootname [file tail $tcl]]
+    set dir  [file dirname $tcl]
+    if {$name eq "eth_xcvr_gty"} {
+        # This script creates two IPs
+        foreach ip_name {eth_xcvr_gty_full eth_xcvr_gty_channel} {
+            set xci "${dir}/${ip_name}/${ip_name}.xci"
+            if {[file exists $xci]} { read_ip $xci }
+        }
+    } else {
+        set xci "${dir}/${name}/${name}.xci"
+        if {[file exists $xci]} { read_ip $xci }
+    }
 }
+
+# Regenerate synthesis targets then run OOC IP synthesis
+generate_target synthesis [get_ips *]
+synth_ip [get_ips *]
+puts "INFO: IP OOC synthesis complete"
 
 # ---------------------------------------------------------------------------
 # Constraints
 # ---------------------------------------------------------------------------
 read_xdc u50.xdc
+set xcvr_xdc ${CORUNDUM}/common/syn/vivado/eth_xcvr_phy_10g_gty_wrapper.tcl
+if {[file exists $xcvr_xdc]} { read_xdc $xcvr_xdc }
 
 # ---------------------------------------------------------------------------
 # Synthesis
 # ---------------------------------------------------------------------------
 puts "INFO: Running synth_design -top ${TOP} -part ${PART}"
 synth_design -top $TOP -part $PART -flatten_hierarchy rebuilt
+
+# Connect debug hub clock if XDMA or IPs instantiated one without a driver
+# (avoids [Chipscope 16-213] ERROR in opt_design)
+if {[llength [get_debug_cores dbg_hub]] > 0} {
+    set clk_pins [get_pins -hierarchical -filter {NAME =~ *axi_aclk* && DIRECTION == OUT}]
+    if {[llength $clk_pins] > 0} {
+        set clk_net [get_nets -of [lindex $clk_pins 0]]
+        if {$clk_net ne ""} {
+            connect_debug_port dbg_hub/clk $clk_net
+            puts "INFO: Connected dbg_hub/clk to [get_property NAME $clk_net]"
+        }
+    }
+}
 
 write_checkpoint -force ${OUT_DIR}/post_synth.dcp
 
