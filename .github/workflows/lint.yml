@@ -5,40 +5,93 @@ on:
     branches: [main]
     paths:
       - 'hw/**'
+      - 'dv/**'
+      - 'sw/**'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'hw/**'
+      - 'dv/**'
+      - 'sw/**'
+      - '.github/workflows/**'
+
+env:
+  VERILATOR_VERSION: v5.046
 
 jobs:
   verilator-lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Cache Verilator 5.020
+      - name: Cache Verilator ${{ env.VERILATOR_VERSION }}
         id: cache-verilator
         uses: actions/cache@v4
         with:
           path: /opt/verilator
-          key: verilator-5.020-ubuntu-latest
+          key: verilator-${{ env.VERILATOR_VERSION }}-ubuntu-latest
 
-      - name: Build Verilator 5.020
+      - name: Build Verilator ${{ env.VERILATOR_VERSION }}
         if: steps.cache-verilator.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison ccache libfl2 libfl-dev zlib1g zlib1g-dev
-          git clone --depth=1 --branch v5.020 https://github.com/verilator/verilator.git /tmp/verilator
+          git clone --depth=1 --branch $VERILATOR_VERSION https://github.com/verilator/verilator.git /tmp/verilator
           cd /tmp/verilator && autoconf && ./configure --prefix=/opt/verilator
           make -j$(nproc) && sudo make install
 
       - name: Add Verilator to PATH
         run: echo "/opt/verilator/bin" >> "$GITHUB_PATH"
 
-      - name: Verilator version
-        run: verilator --version
-
       - name: Lint
         run: make lint
+
+  verilator-tb:
+    runs-on: ubuntu-latest
+    needs: verilator-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Verilator ${{ env.VERILATOR_VERSION }}
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-${{ env.VERILATOR_VERSION }}-ubuntu-latest
+
+      - name: Build Verilator ${{ env.VERILATOR_VERSION }}
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison ccache libfl2 libfl-dev zlib1g zlib1g-dev
+          git clone --depth=1 --branch $VERILATOR_VERSION https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure --prefix=/opt/verilator
+          make -j$(nproc) && sudo make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        run: sudo apt-get install -y ccache g++
+
+      - name: Build and run xdma_regs_tb
+        run: |
+          verilator --cc --binary --Mdir obj_dir \
+            -Ihw/ip/xdma_wrapper \
+            dv/unit/xdma_regs_tb.sv hw/ip/xdma_wrapper/xdma_regs.sv \
+            -o xdma_regs_tb
+          ./obj_dir/xdma_regs_tb | tee /tmp/tb_out.txt
+          grep -q "TB PASS" /tmp/tb_out.txt
+
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check sw/ dv/integration/ dv/unit/

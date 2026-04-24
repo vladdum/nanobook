@@ -20,6 +20,14 @@ for day in "${DAYS[@]}"; do
   curl -L -f -o "${day}.gz" "${BASE_URL}/${day}.gz"
 done
 
-echo "Verifying checksums ..."
-sha256sum --check checksums.sha256
-echo "All pcaps present and verified."
+# Skip verification if checksums are still placeholder zeros.
+if grep -q "^0000000000000000000000000000000000000000000000000000000000000000" checksums.sha256; then
+  echo ""
+  echo "WARNING: checksums.sha256 contains placeholder zeros."
+  echo "  Update with: cd data/pcaps && sha256sum *.gz > checksums.sha256"
+  echo "  Then commit the updated checksums.sha256."
+else
+  echo "Verifying checksums ..."
+  sha256sum --check checksums.sha256
+  echo "All pcaps present and verified."
+fi
