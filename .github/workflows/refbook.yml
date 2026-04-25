@@ -1,0 +1,118 @@
+name: refbook
+
+on:
+  pull_request:
+    paths:
+      - "sw/refbook/**"
+      - "third_party/pybind11/**"
+      - ".github/workflows/refbook.yml"
+  push:
+    branches: [main]
+
+jobs:
+  build-test-cover:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        compiler:
+          - {cc: gcc-12,   cxx: g++-12}
+          - {cc: clang-16, cxx: clang++-16}
+        python: ["3.11", "3.12"]
+        # apt.llvm.org doesn't ship clang-16 for noble (Ubuntu 24.04); skip that combo.
+        exclude:
+          - os: ubuntu-24.04
+            compiler: {cc: clang-16, cxx: clang++-16}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build lcov
+          # The clang-N apt package provides both clang-N and clang++-N binaries,
+          # so we install only matrix.compiler.cc (matrix.compiler.cxx is a binary
+          # name, not a separate package). On ubuntu-22.04, clang-16 isn't in the
+          # default repos, so use apt.llvm.org's official installer.
+          if [[ "${{ matrix.compiler.cc }}" == clang-* ]]; then
+            CLANG_VER="${{ matrix.compiler.cc }}"
+            CLANG_VER="${CLANG_VER#clang-}"
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh
+            sudo /tmp/llvm.sh "$CLANG_VER"
+          else
+            sudo apt-get install -y "${{ matrix.compiler.cc }}"
+          fi
+
+      - name: Configure
+        env:
+          CC:  ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cxx }}
+        run: |
+          cmake -S sw/refbook -B sw/refbook/build -G Ninja \
+            -DREFBOOK_BUILD_TESTS=ON \
+            -DREFBOOK_BUILD_BENCH=ON \
+            -DREFBOOK_BUILD_PYTHON=ON \
+            -DREFBOOK_COVERAGE=ON \
+            -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build sw/refbook/build -j
+
+      - name: Run ctest
+        run: ctest --test-dir sw/refbook/build --output-on-failure
+
+      - name: Coverage gate (≥ 95% lines on src/ + include/)
+        if: matrix.os == 'ubuntu-24.04' && matrix.compiler.cc == 'gcc-12' && matrix.python == '3.12'
+        run: |
+          cmake --build sw/refbook/build --target refbook_coverage
+          LINE_PCT=$(grep -oP 'lines\.+: \K[0-9.]+' sw/refbook/build/coverage_summary.txt | head -n1)
+          echo "Line coverage: $LINE_PCT%"
+          python -c "import sys; sys.exit(0 if float('$LINE_PCT') >= 95.0 else 1)"
+
+      - name: Build Python wheel
+        run: |
+          pip install build
+          python -m build sw/refbook --wheel
+          ls sw/refbook/dist/
+
+      - name: Install and smoke import
+        run: |
+          pip install sw/refbook/dist/refbook-*.whl
+          python -c "
+          import refbook
+          b = refbook.Book(n_symbols=10)
+          e = refbook.BookEvent()
+          e.type = int(refbook.EventType.Add)
+          e.symbol_id = 0; e.side = 0
+          e.price = 1_000_000; e.shares = 100
+          e.order_id = 1; e.ingress_ts = 1
+          d = b.step(e)
+          assert d is not None and d.new_best_price == 1_000_000
+          print('smoke OK')
+          "
+
+      - name: Run benchmark (warning-only; posts to summary)
+        if: matrix.os == 'ubuntu-24.04' && matrix.compiler.cc == 'gcc-12' && matrix.python == '3.12'
+        run: |
+          # Rebuild in Release for representative numbers.
+          cmake -S sw/refbook -B sw/refbook/bench-build -G Ninja \
+            -DREFBOOK_BUILD_TESTS=OFF -DREFBOOK_BUILD_BENCH=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build sw/refbook/bench-build --target refbook_bench -j
+          sw/refbook/bench-build/refbook_bench --benchmark_out=bench.json | tee bench.txt
+          {
+            echo "### refbook benchmark (Release)"
+            echo ''
+            echo '```'
+            cat bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
