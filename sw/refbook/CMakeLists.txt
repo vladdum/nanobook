@@ -27,6 +27,7 @@ target_sources(refbook_core PRIVATE
   src/order_pool.cpp
   src/price_ladder.cpp
   src/sliding_window.cpp
+  src/book.cpp
 )
 target_include_directories(refbook_core PUBLIC include)
 target_compile_options(refbook_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -49,6 +50,11 @@ if(REFBOOK_BUILD_TESTS)
     test/test_order_map.cpp
     test/test_price_ladder.cpp
     test/test_sliding_window.cpp
+    test/test_book_add.cpp
+    test/test_book_delete.cpp
+    test/test_book_cancel_exec.cpp
+    test/test_book_multisym.cpp
+    test/test_properties.cpp
   )
   target_link_libraries(refbook_tests PRIVATE refbook_core GTest::gtest_main)
   include(GoogleTest)
