@@ -22,8 +22,9 @@ if(REFBOOK_COVERAGE)
   include(cmake/Coverage.cmake)
 endif()
 
-add_library(refbook_core STATIC
-  src/.placeholder.cpp
+add_library(refbook_core STATIC)
+target_sources(refbook_core PRIVATE
+  src/order_pool.cpp
 )
 target_include_directories(refbook_core PUBLIC include)
 target_compile_options(refbook_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -42,6 +43,8 @@ if(REFBOOK_BUILD_TESTS)
   target_sources(refbook_tests PRIVATE
     test/test_tob_delta.cpp
     test/test_book_event.cpp
+    test/test_order_pool.cpp
+    test/test_order_map.cpp
   )
   target_link_libraries(refbook_tests PRIVATE refbook_core GTest::gtest_main)
   include(GoogleTest)
