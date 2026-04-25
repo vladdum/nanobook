@@ -185,6 +185,11 @@ typedef struct packed {
 ~13-day rollover). It accompanies the event all the way to the DMA ring so the host can compute
 frame-to-TOB-update latency directly.
 
+**Canonical C++ form:** `sw/refbook/include/refbook/book_event.h`. At M3 freeze, the
+SystemVerilog package file `hw/ip/itch_decoder/book_event_pkg.sv` must mirror the C++
+header field-for-field (same offsets, same enum values). A CI diff check or codegen
+script maintains the invariant.
+
 ---
 
 ## 4. L3 book core
@@ -425,12 +430,26 @@ Ring size starts at 1 M entries (32 MB) — sized for multi-second bursts withou
 
 ### 6.3 Reference book (golden model)
 
-- **`reference_book.cpp`** — clean C++17 implementation of the same L3 book logic, used for
-  bit-exact comparison. Design principles:
-  - No STL containers on the hot path; custom slab allocator + intrusive lists to mirror the RTL data structures
-  - Same sliding-window price ladder (so output matches even on book-quake rebases)
+- **`sw/refbook/`** — clean-room C++17 implementation of the same L3 book logic,
+  used for bit-exact comparison. Design principles:
+  - Hybrid fidelity: **structural mirror** for `PriceLadder` (4K-tick ring +
+    bitmap + CLZ) and `SlidingWindow` (±2048-tick window + EMA midprice +
+    rebase), because their state is observable at the TOB boundary; **behavioral**
+    `OrderMap` and `OrderPool` — internal collision handling and allocator
+    choices are invisible at the TOB boundary.
+  - No STL on the hot path for structural components. `OrderMap` uses
+    `std::unordered_map` deliberately — it is behavioral.
+  - Sliding-window rebase algorithm (EMA α = 1/16, trigger outside ±2048 ticks)
+    is frozen at M02 and becomes the contract for M05+ RTL.
   - Emits the identical 32-byte TOB delta record as the FPGA
-  - Exposed via pybind11 so the Python analyzer can drive it alongside the FPGA
+    (`sw/refbook/include/refbook/tob_delta.h`, frozen at M02).
+  - Exposed via pybind11 so the Python analyzer drives it alongside the FPGA.
+  - Consumes normalized `BookEvent` records (see §3.4), NOT raw ITCH bytes.
+    Decoding ITCH into `BookEvent` is the decoder's job (M03 RTL + M04 Python
+    parser); this split isolates decoder bugs from book bugs.
+  - M02 reproducibility gate uses a seeded synthetic stream (10 M events).
+    Real-pcap validation (roadmap exit criterion #2) is carried to the first
+    month NASDAQ TVITCH 5.0 data becomes available.
 
 ### 6.4 Latency analyzer
 
