@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Enforce conventional commit format:
 # <type>[(scope)]: <description>
-# Types: feat, fix, docs, chore, refactor, test, ci, perf, revert
+# Types: feat, fix, docs, chore, refactor, test, ci, perf, revert, build, bench
 set -euo pipefail
 
 msg=$(head -1 "$1")
-pattern='^(feat|fix|docs|chore|refactor|test|ci|perf|revert)(\([a-z0-9/_-]+\))?!?: .+'
+pattern='^(feat|fix|docs|chore|refactor|test|ci|perf|revert|build|bench)(\([a-z0-9/_-]+\))?!?: .+'
 
 if ! echo "$msg" | grep -qE "$pattern"; then
   echo "error: commit message must follow conventional commits format"
   echo "  expected: <type>[(scope)]: <description>"
-  echo "  types:    feat fix docs chore refactor test ci perf revert"
+  echo "  types:    feat fix docs chore refactor test ci perf revert build bench"
   echo "  got:      $msg"
   exit 1
 fi

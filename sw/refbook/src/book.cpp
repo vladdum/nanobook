@@ -137,17 +137,14 @@ std::optional<TobDelta> Book::on_delete(const BookEvent& ev) {
   auto slot  = *slot_opt;
   auto& rec  = pool_.at(slot);
   auto& sym  = symbols_[rec.symbol_id];
-  auto tick  = sym.window.price_to_tick(rec.price);
-  if (!tick) {                       // stale from a prior rebase
-    id_map_.erase(ev.order_id);
-    pool_.release(slot);
-    return std::nullopt;
-  }
+  // id_map_ invariant: on_add clears id_map_ on rebase, so any order present
+  // here was inserted post-rebase and its price is in the current window.
+  auto tick  = *sym.window.price_to_tick(rec.price);
 
   auto prev_best  = sym.ladder.best(rec.side);
   uint64_t prev_best_size =
       prev_best ? sym.ladder.level(rec.side, *prev_best).agg_size : 0;
-  sym.ladder.remove(rec.side, *tick, slot, rec.shares, pool_);
+  sym.ladder.remove(rec.side, tick, slot, rec.shares, pool_);
   id_map_.erase(ev.order_id);
   // Save side and symbol BEFORE releasing the slot — pool_.release()
   // zero-fills the OrderRecord, so any read through `rec` afterwards
@@ -173,30 +170,26 @@ static std::optional<TobDelta> decrement_shares_common(
   auto slot  = *slot_opt;
   auto& rec  = pool.at(slot);
   auto& sym  = symbols[rec.symbol_id];
-  auto tick  = sym.window.price_to_tick(rec.price);
-  if (!tick) {
-    id_map.erase(ev.order_id);
-    pool.release(slot);
-    return std::nullopt;
-  }
+  // id_map invariant: on_add clears id_map on rebase, so any order present
+  // here was inserted post-rebase and its price is in the current window.
+  auto tick  = *sym.window.price_to_tick(rec.price);
 
   auto prev_best = sym.ladder.best(rec.side);
   uint64_t prev_best_size =
       prev_best ? sym.ladder.level(rec.side, *prev_best).agg_size : 0;
   uint32_t delta = std::min<uint32_t>(rec.shares, ev.shares);
   rec.shares -= delta;
-  bool level_empty = sym.ladder.decrement_shares(rec.side, *tick, delta);
+  // level_empty branch is unreachable: agg_size >= rec.shares before the
+  // decrement (this order contributes rec.shares); after both decrement by
+  // delta, agg_size >= rec.shares still holds, so rec.shares > 0 implies
+  // agg_size > 0. The rec.shares == 0 case below covers all empty-level cases.
+  sym.ladder.decrement_shares(rec.side, tick, delta);
   TobReason effective = reason;
   uint8_t saved_side = rec.side;
   uint16_t saved_sym = rec.symbol_id;
 
   if (rec.shares == 0) {
-    sym.ladder.remove(rec.side, *tick, slot, 0, pool);
-    id_map.erase(ev.order_id);
-    pool.release(slot);
-    effective = TobReason::Delete;
-  } else if (level_empty) {
-    sym.ladder.remove(rec.side, *tick, slot, 0, pool);
+    sym.ladder.remove(rec.side, tick, slot, 0, pool);
     id_map.erase(ev.order_id);
     pool.release(slot);
     effective = TobReason::Delete;
