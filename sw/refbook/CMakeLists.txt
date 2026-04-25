@@ -25,6 +25,7 @@ endif()
 add_library(refbook_core STATIC)
 target_sources(refbook_core PRIVATE
   src/order_pool.cpp
+  src/price_ladder.cpp
 )
 target_include_directories(refbook_core PUBLIC include)
 target_compile_options(refbook_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -45,6 +46,7 @@ if(REFBOOK_BUILD_TESTS)
     test/test_book_event.cpp
     test/test_order_pool.cpp
     test/test_order_map.cpp
+    test/test_price_ladder.cpp
   )
   target_link_libraries(refbook_tests PRIVATE refbook_core GTest::gtest_main)
   include(GoogleTest)
