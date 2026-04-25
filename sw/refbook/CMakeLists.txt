@@ -55,10 +55,15 @@ if(REFBOOK_BUILD_TESTS)
     test/test_book_cancel_exec.cpp
     test/test_book_multisym.cpp
     test/test_properties.cpp
+    test/test_reproducibility.cpp
   )
   target_link_libraries(refbook_tests PRIVATE refbook_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(refbook_tests)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/reproducibility_expected.sha256
+    ${CMAKE_CURRENT_BINARY_DIR}/test/reproducibility_expected.sha256
+    COPYONLY)
 endif()
 
 if(REFBOOK_BUILD_BENCH)
