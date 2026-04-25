@@ -2,7 +2,8 @@
 SHELL := /bin/bash
 VIVADO ?= vivado
 
-.PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap clean clean-all
+.PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap \
+        clean clean-all refbook refbook-test refbook-bench
 
 help:
 	@echo "Nanobook — available targets:"
@@ -13,6 +14,9 @@ help:
 	@echo "  fetch-pcaps    Download pinned NASDAQ ITCH pcaps"
 	@echo "  verify-pcaps   Verify pcap SHA-256 checksums"
 	@echo "  gen-ber-pcap   Generate synthetic frame stream for the BER test"
+	@echo "  refbook        Build C++ refbook (static lib + Python module)"
+	@echo "  refbook-test   Build + test refbook (with coverage)"
+	@echo "  refbook-bench  Run refbook Google Benchmark"
 	@echo "  clean          Remove build artifacts"
 
 shell:
@@ -45,7 +49,23 @@ wrpcap('dv/integration/data/ber_frames.pcap', frames)"
 clean:
 	$(MAKE) -C hw/synth clean
 	rm -rf build .Xil *.jou *.log *.str
+	rm -rf sw/refbook/build sw/refbook/bench-build sw/refbook/_skbuild sw/refbook/dist
 
 clean-all: clean
 	find hw/ip -name "*.xci" -delete
 	rm -f data/pcaps/*.gz
+
+refbook:
+	cmake -S sw/refbook -B sw/refbook/build -DREFBOOK_BUILD_TESTS=ON -DREFBOOK_BUILD_PYTHON=ON
+	cmake --build sw/refbook/build -j
+
+refbook-test:
+	cmake -S sw/refbook -B sw/refbook/build -DREFBOOK_BUILD_TESTS=ON -DREFBOOK_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+	cmake --build sw/refbook/build -j
+	ctest --test-dir sw/refbook/build --output-on-failure
+	cmake --build sw/refbook/build --target refbook_coverage
+
+refbook-bench:
+	cmake -S sw/refbook -B sw/refbook/bench-build -DREFBOOK_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
+	cmake --build sw/refbook/bench-build --target refbook_bench -j
+	sw/refbook/bench-build/refbook_bench

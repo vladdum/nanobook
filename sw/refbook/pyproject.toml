@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "refbook"
+version = "0.1.0"
+description = "Nanobook reference L3 order book — golden model"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Nanobook contributors"}]
+dependencies = ["numpy>=1.26"]
+
+[tool.scikit-build]
+cmake.version = ">=3.26"
+cmake.args = ["-DREFBOOK_BUILD_PYTHON=ON", "-DREFBOOK_BUILD_TESTS=OFF"]
+wheel.packages = []
+wheel.py-api = "cp311"

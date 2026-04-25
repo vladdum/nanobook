@@ -32,9 +32,10 @@ target_sources(refbook_core PRIVATE
 target_include_directories(refbook_core PUBLIC include)
 target_compile_options(refbook_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+include(FetchContent)
+
 if(REFBOOK_BUILD_TESTS)
   enable_testing()
-  include(FetchContent)
   FetchContent_Declare(
     googletest
     URL      https://github.com/google/googletest/archive/v1.15.2.tar.gz
@@ -56,6 +57,8 @@ if(REFBOOK_BUILD_TESTS)
     test/test_book_multisym.cpp
     test/test_properties.cpp
     test/test_reproducibility.cpp
+    test/test_book_coverage.cpp
+    test/test_pcap_replay.cpp
   )
   target_link_libraries(refbook_tests PRIVATE refbook_core GTest::gtest_main)
   include(GoogleTest)
@@ -82,4 +85,5 @@ if(REFBOOK_BUILD_PYTHON)
   add_subdirectory(${CMAKE_SOURCE_DIR}/../../third_party/pybind11 pybind11_build)
   pybind11_add_module(refbook bindings/pybind_module.cpp)
   target_link_libraries(refbook PRIVATE refbook_core)
+  install(TARGETS refbook LIBRARY DESTINATION .)
 endif()
