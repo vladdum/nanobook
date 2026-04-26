@@ -19,7 +19,7 @@ package book_event_pkg;
   // book_event_t — mirrors struct BookEvent
   // total 32 bytes (256 bits) — mirrors C++ layout
   typedef struct packed {
-    logic [7:0]  type;
+    logic [7:0]  ev_type;
     logic [7:0]  side;
     logic [15:0] symbol_id;
     logic [31:0] price;

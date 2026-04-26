@@ -80,7 +80,7 @@ def test_render_package_produces_valid_sv():
     assert "logic [31:0] price;"      in out
     assert "logic [15:0] symbol_id;"  in out
     assert "logic [7:0]  side;"       in out
-    assert "logic [7:0]  type;"       in out  # `type` is a SV keyword; quoted in render
+    assert "logic [7:0]  ev_type;"    in out  # `type` is a SV keyword; emitted as ev_type
     assert "} book_event_t;"          in out
     assert "endpackage" in out
     # Layout assertion comment so a future reader can grep it
