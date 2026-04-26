@@ -146,6 +146,10 @@ jobs:
       # ubuntu-24.04's apt verilator is 5.020 — too old for cocotb 2.0
       # (which requires >= 5.036). Build from source, with cache so
       # subsequent runs are fast.
+      - name: Install runtime deps (always — cocotb compiles sim via g++/ccache)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ ccache make libfl2
       - name: Cache Verilator install
         id: cache-verilator
         uses: actions/cache@v4
@@ -155,10 +159,9 @@ jobs:
       - name: Build Verilator from source
         if: steps.cache-verilator.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
           sudo apt-get install -y \
-            git make autoconf g++ flex bison libfl2 libfl-dev \
-            help2man libgoogle-perftools-dev ccache
+            git autoconf flex bison libfl-dev \
+            help2man libgoogle-perftools-dev
           git clone --depth 1 --branch "$VERILATOR_VERSION" \
             https://github.com/verilator/verilator.git /tmp/verilator
           cd /tmp/verilator
@@ -171,9 +174,7 @@ jobs:
           echo "/opt/verilator/bin" >> "$GITHUB_PATH"
           /opt/verilator/bin/verilator --version
       - name: Install cocotb
-        run: |
-          sudo apt-get install -y libfl2  # runtime dep when verilator is from cache
-          pip install cocotb cocotb-test pytest
+        run: pip install cocotb cocotb-test pytest
       - name: Lint itch_decoder
         run: make itch-decoder-lint
       - name: Run cocotb suite
