@@ -3,7 +3,8 @@ SHELL := /bin/bash
 VIVADO ?= vivado
 
 .PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap \
-        clean clean-all refbook refbook-test refbook-bench
+        clean clean-all refbook refbook-test refbook-bench \
+        itch-decoder-codegen-check
 
 help:
 	@echo "Nanobook — available targets:"
@@ -17,6 +18,7 @@ help:
 	@echo "  refbook        Build C++ refbook (static lib + Python module)"
 	@echo "  refbook-test   Build + test refbook (with coverage)"
 	@echo "  refbook-bench  Run refbook Google Benchmark"
+	@echo "  itch-decoder-codegen-check  Re-run codegen, assert no diff vs committed package"
 	@echo "  clean          Remove build artifacts"
 
 shell:
@@ -69,3 +71,8 @@ refbook-bench:
 	cmake -S sw/refbook -B sw/refbook/bench-build -DREFBOOK_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
 	cmake --build sw/refbook/bench-build --target refbook_bench -j
 	sw/refbook/bench-build/refbook_bench
+
+itch-decoder-codegen-check:
+	@python3 hw/ip/itch_decoder/scripts/gen_book_event_pkg.py
+	@git diff --exit-code hw/ip/itch_decoder/book_event_pkg.sv \
+	  || (echo "ERROR: book_event_pkg.sv is stale — re-run gen_book_event_pkg.py" && exit 1)

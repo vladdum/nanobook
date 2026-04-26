@@ -5,6 +5,7 @@ on:
     paths:
       - "sw/refbook/**"
       - "third_party/pybind11/**"
+      - "hw/ip/itch_decoder/**"
       - ".github/workflows/refbook.yml"
   push:
     branches: [main]
@@ -116,3 +117,16 @@ jobs:
             cat bench.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  itch-decoder-codegen:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Codegen idempotency check
+        run: make itch-decoder-codegen-check
