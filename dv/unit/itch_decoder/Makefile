@@ -17,4 +17,8 @@ VERILOG_SOURCES ?= $(RTL_DIR)/book_event_pkg.sv \
 TOPLEVEL ?= itch_decoder
 MODULE   ?= tb_itch_decoder_smoke
 
+# Per-toplevel sim build dir so different TBs don't collide on the cached
+# `Vtop` binary (each TB has its own toplevel module and source list).
+SIM_BUILD ?= sim_build_$(TOPLEVEL)
+
 include $(shell cocotb-config --makefiles)/Makefile.sim

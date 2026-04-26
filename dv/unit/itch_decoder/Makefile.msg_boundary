@@ -1,0 +1,5 @@
+TOPLEVEL        := msg_boundary
+MODULE          := tb_msg_boundary
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+                   $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/msg_boundary.sv)
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile
