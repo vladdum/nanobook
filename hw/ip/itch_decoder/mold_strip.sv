@@ -58,6 +58,9 @@ module mold_strip #(
     logic [TS_W-1:0] held_tuser;
     logic [DATA_W-1:0] held_data;
     logic [DATA_W/8-1:0] held_keep;
+    // drain_pending: set when a TLAST payload beat has residual bytes in held_data
+    // (upper nibble of tkeep was non-zero). Blocks new input until drain fires.
+    logic drain_pending;
 
     // Output registers
     logic [DATA_W-1:0]    m_tdata_q;
@@ -72,7 +75,12 @@ module mold_strip #(
     assign m_tlast        = m_tlast_q;
     assign m_tuser        = m_tuser_q;
     assign mold_seq_gap   = gap_count_q;
-    assign s_tready       = m_tready;  // 1-cycle backpressure pass-through
+    // Accept new input only when the output register is empty or being consumed
+    // this cycle. This prevents a race where a new output beat is queued while
+    // the existing registered beat has not yet been accepted by downstream.
+    // Block new input when: output register occupied AND not consumed this cycle,
+    // OR a drain is pending (residual bytes from the previous TLAST beat).
+    assign s_tready       = (!m_tvalid_q || m_tready) && !drain_pending;
 
     always_ff @(posedge clk) begin
         if (!rstn) begin
@@ -84,14 +92,17 @@ module mold_strip #(
             held_tuser        <= '0;
             held_data         <= '0;
             held_keep         <= '0;
+            drain_pending     <= 1'b0;
             m_tvalid_q        <= 1'b0;
             m_tlast_q         <= 1'b0;
             m_tdata_q         <= '0;
             m_tkeep_q         <= '0;
             m_tuser_q         <= '0;
         end else begin
-            m_tvalid_q <= 1'b0;
-            m_tlast_q  <= 1'b0;
+            // Deassert output valid only when the current output is consumed by
+            // downstream (m_tready=1) or there is no pending output.
+            if (m_tvalid_q && m_tready)
+                m_tvalid_q <= 1'b0;
             if (s_tvalid && s_tready) begin
                 case (state)
                     ST_HEADER_BEAT0: begin
@@ -132,6 +143,7 @@ module mold_strip #(
                         m_tdata_q  <= {s_tdata[31:0], held_data[31:0]};
                         m_tkeep_q  <= {s_tkeep[3:0],  held_keep[3:0]};
                         m_tvalid_q <= 1'b1;
+                        m_tlast_q  <= 1'b0;  // default non-last; overridden below
                         m_tuser_q  <= held_tuser;
                         held_tuser <= '0;  // emit only on first payload beat
                         held_data  <= {32'h0, s_tdata[63:32]};
@@ -142,13 +154,17 @@ module mold_strip #(
                             held_data  <= '0;
                             held_keep  <= '0;
                             state      <= ST_HEADER_BEAT0;
+                        end else if (s_tlast) begin
+                            // Upper-4 bytes carried into held_data — set drain_pending
+                            // so new input is blocked until drain fires with TLAST.
+                            drain_pending <= 1'b1;
                         end
-                        // else: stay in ST_PAYLOAD; the drain branch (below) emits
-                        // the remaining held bytes with TLAST on the next cycle.
+                        // else: stay in ST_PAYLOAD (mid-packet, more beats coming).
                     end
                 endcase
-            end else if (state == ST_PAYLOAD && (held_keep != '0)) begin
-                // Drain remaining held bytes after TLAST.
+            end else if (state == ST_PAYLOAD && drain_pending && !m_tvalid_q) begin
+                // Drain remaining held bytes after TLAST (only when output
+                // register is empty, to avoid overwriting un-consumed data).
                 m_tdata_q  <= held_data;
                 m_tkeep_q  <= held_keep;
                 m_tvalid_q <= 1'b1;
@@ -157,6 +173,7 @@ module mold_strip #(
                 held_data  <= '0;
                 held_keep  <= '0;
                 held_tuser <= '0;
+                drain_pending <= 1'b0;
                 state      <= ST_HEADER_BEAT0;
             end
         end
