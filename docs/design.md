@@ -106,7 +106,8 @@ flowchart LR
 ### 2.3 Clocks
 
 - **10G MAC RX/TX (XGMII):** 156.25 MHz
-- **User logic:** 250 MHz (target; fallback 200 MHz)
+- **User logic (book core, DMA):** 250 MHz (target; fallback 200 MHz)
+- **ITCH decoder:** 400 MHz (M03 OOC verified; async FIFO to user-logic domain)
 - **HBM AXI:** 450 MHz (HBM IP default)
 - **PCIe / XDMA:** 250 MHz (Xilinx XDMA default for Gen3 x16)
 - **CDCs:** asynchronous FIFOs between MAC and user logic; AXI clock converters on HBM and PCIe boundaries
@@ -114,6 +115,11 @@ flowchart LR
 ---
 
 ## 3. ITCH 5.0 decoder
+
+**Status:** implemented in M03. RTL under `hw/ip/itch_decoder/` (13 SV files: top, six pipeline
+stages, five per-type extractors, and the `book_event_pkg` package). Vivado OOC synth meets
+400 MHz on xcu50 (WNS +0.736 ns at 2.5 ns period); detailed spec at
+`docs/superpowers/specs/2026-04-26-nanobook-m03-itch-decoder-design.md`.
 
 ### 3.1 Wire format
 
@@ -145,8 +151,9 @@ flowchart LR
 ```
 
 Six pipeline stages, one message per cycle steady-state. Target latency 3–5 cycles per message
-(≈12–20 ns at 250 MHz). Throughput ceiling ~250 M events/s, well above 10GbE peak burst
-(~50 M msg/s).
+(≈7.5–12.5 ns at 400 MHz). Decoder OOC Fmax measured 400 MHz; integration into the 250 MHz
+user-logic domain uses an async FIFO at the decoder→`lob_core` boundary. Throughput ceiling
+~400 M events/s, well above 10GbE peak burst (~50 M msg/s).
 
 ### 3.3 Message-type handling
 

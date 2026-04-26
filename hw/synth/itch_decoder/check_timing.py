@@ -1,4 +1,4 @@
-"""Parse Vivado OOC timing report; assert Fmax >= 250 MHz and zero critical warnings.
+"""Parse Vivado OOC timing report; assert Fmax >= 400 MHz and zero critical warnings.
 
 Run after `vivado -mode batch -source synth.tcl`. Returns 0 on PASS, 1 on FAIL.
 """
@@ -20,7 +20,7 @@ def main() -> int:
         print("ERROR: WNS not found in timing report", file=sys.stderr)
         return 1
     wns = float(m.group(1))
-    print(f"WNS: {wns} ns ({'PASS' if wns >= 0 else 'FAIL'} 250 MHz target)")
+    print(f"WNS: {wns} ns ({'PASS' if wns >= 0 else 'FAIL'} 400 MHz target)")
     if wns < 0:
         return 1
 
