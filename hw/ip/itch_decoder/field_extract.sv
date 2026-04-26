@@ -6,11 +6,6 @@
 `define FIELD_EXTRACT_SV
 
 `include "book_event_pkg.sv"
-`include "extract_add.sv"
-`include "extract_exec.sv"
-`include "extract_cancel.sv"
-`include "extract_delete.sv"
-`include "extract_replace.sv"
 
 module field_extract #(
     parameter int unsigned DATA_W = 64,
