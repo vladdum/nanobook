@@ -1,0 +1,5 @@
+TOPLEVEL := endian_swap
+MODULE   := tb_endian_swap
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+                   $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/endian_swap.sv)
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile
