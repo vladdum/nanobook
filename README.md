@@ -11,7 +11,17 @@ Full architecture: [`docs/design.md`](docs/design.md).
 
 ## Status
 
-**Month 1 of 12** — toolchain, shell bitstream, and de-risk spikes. Not a working system yet.
+**Month 3 of 12 — complete.** Next: M04 (decoder validated on real pcaps).
+
+| Month | Scope | Status |
+| --- | --- | --- |
+| M01 | Toolchain, shell bitstream (XDMA + HBM + 10G), BAR0 freeze | done |
+| M02 | C++17 reference book + pybind11 + synthetic ITCH generator | done |
+| M03 | `itch_decoder` (MoldUDP64 + ITCH 5.0 → `book_event_t`), Vivado OOC at 400 MHz | done |
+| M04 | Real-pcap regression: RTL output bit-exact vs Python ITCH parser on 3 pinned NASDAQ captures | next |
+
+End-of-month retrospectives live in [`docs/retrospectives/`](docs/retrospectives/).
+Not a working end-to-end system yet — `lob_core`, DMA result path, and host integration land in M05–M10.
 
 ## Architecture
 
@@ -97,22 +107,23 @@ All build commands below should be run inside the WSL/Ubuntu terminal.
   xbutil --version
   ```
 
-- **[Verilator](https://www.veripool.org/verilator/)** ≥ 5.020 — for lint and simulation.
-  Distro packages are usually stale; build from source:
+- **[Verilator](https://www.veripool.org/verilator/)** ≥ 5.040 — for lint and cocotb simulation.
+  Cocotb 2.0 requires a recent Verilator; distro packages are stale (Ubuntu 24.04 ships 5.020,
+  too old for `cocotb 2.0`). Build from source:
 
   ```bash
   sudo apt-get install git help2man perl python3 make autoconf g++ flex bison ccache
   sudo apt-get install libgoogle-perftools-dev numactl perl-doc
   sudo apt-get install libfl2 libfl-dev zlib1g zlib1g-dev libelf-dev
   git clone https://github.com/verilator/verilator.git
-  cd verilator && git checkout v5.020 && autoconf && ./configure
+  cd verilator && git checkout v5.046 && autoconf && ./configure
   make -j $(nproc) && sudo make install
   ```
 
 - **Python 3.11+** with:
 
   ```bash
-  pip3 install cocotb cocotbext-axi cocotbext-eth pybind11 scapy numpy
+  pip3 install 'cocotb>=2.0' cocotbext-axi cocotbext-eth pybind11 scapy numpy
   ```
 
 - **tcpreplay** — for the 10G loopback BER test (`sudo apt install tcpreplay`).
@@ -149,7 +160,17 @@ make clean            # Remove build artifacts
 
 ## Module-Level Testbenches
 
-Per-module unit TBs live in `dv/unit/` and use cocotb + Verilator:
+Per-module unit TBs live in `dv/unit/<module>/` and use cocotb + Verilator. The M03 ITCH
+decoder shipped 14 TBs:
+
+```bash
+make -C dv/unit/itch_decoder -f Makefile.e2e          # 10K-event byte-exact vs refbook
+make -C dv/unit/itch_decoder -f Makefile.throughput   # input acceptance ratio
+make itch-decoder-test                                # smoke
+make itch-decoder-lint                                # Verilator lint, 0 warnings
+```
+
+M01–M02 module TBs live in `dv/unit/`:
 
 ```bash
 cd dv/unit
