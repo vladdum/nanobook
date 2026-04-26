@@ -92,12 +92,14 @@ def render_package(parsed: Parsed) -> str:
     # 12 == len("logic [63:0]"); shorter decls (e.g., "logic [7:0]") get
     # 1 char of padding so the field-name column is consistent.
     width_col = 12
+    # SV reserved keywords that conflict with C++ field names. These are
+    # rewritten on the SV side only — byte layout (the freeze-list
+    # invariant) is unchanged. The C++ struct keeps the original name.
+    _SV_FIELD_RENAMES = {"type": "ev_type"}
     for name, ctype, _bytes in parsed["fields"]:
         bits = _TYPE_BITS[ctype]
         decl = f"logic [{bits-1}:0]"
-        sv_name = name
-        # SV keyword conflict: emit as-is — the user can `book_event_t.type`
-        # because struct member access doesn't conflict with the keyword.
+        sv_name = _SV_FIELD_RENAMES.get(name, name)
         field_lines.append(f"    {decl:<{width_col}} {sv_name};")
 
     out = f"""// AUTO-GENERATED FROM sw/refbook/include/refbook/book_event.h

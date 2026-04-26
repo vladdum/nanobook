@@ -4,7 +4,7 @@ VIVADO ?= vivado
 
 .PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap \
         clean clean-all refbook refbook-test refbook-bench \
-        itch-decoder-codegen-check
+        itch-decoder-codegen-check itch-decoder-test itch-decoder-lint
 
 help:
 	@echo "Nanobook — available targets:"
@@ -19,6 +19,8 @@ help:
 	@echo "  refbook-test   Build + test refbook (with coverage)"
 	@echo "  refbook-bench  Run refbook Google Benchmark"
 	@echo "  itch-decoder-codegen-check  Re-run codegen, assert no diff vs committed package"
+	@echo "  itch-decoder-test  Run cocotb suite for itch_decoder under Verilator"
+	@echo "  itch-decoder-lint  Verilator lint of itch_decoder RTL"
 	@echo "  clean          Remove build artifacts"
 
 shell:
@@ -76,3 +78,11 @@ itch-decoder-codegen-check:
 	@python3 hw/ip/itch_decoder/scripts/gen_book_event_pkg.py
 	@git diff --exit-code hw/ip/itch_decoder/book_event_pkg.sv \
 	  || (echo "ERROR: book_event_pkg.sv is stale — re-run gen_book_event_pkg.py" && exit 1)
+
+itch-decoder-test:
+	$(MAKE) -C dv/unit/itch_decoder MODULE=tb_itch_decoder_smoke
+
+itch-decoder-lint:
+	verilator --lint-only -Wall -Wno-DECLFILENAME \
+	  -Ihw/ip/itch_decoder \
+	  hw/ip/itch_decoder/itch_decoder.sv
