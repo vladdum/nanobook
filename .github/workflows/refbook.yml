@@ -6,6 +6,7 @@ on:
       - "sw/refbook/**"
       - "third_party/pybind11/**"
       - "hw/ip/itch_decoder/**"
+      - "dv/unit/itch_decoder/**"
       - ".github/workflows/refbook.yml"
   push:
     branches: [main]
