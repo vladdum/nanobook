@@ -1,0 +1,4 @@
+TOPLEVEL := event_pack
+MODULE   := tb_event_pack
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/event_pack.sv)
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile
