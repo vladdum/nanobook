@@ -126,20 +126,182 @@ def generate_itch_bytes(seed: int, n_symbols: int = 100, n_events: int = 10_000_
     return bytes(out)
 
 
+def _decode_itch(msg: bytes) -> BookEvent:
+    """Decode a single ITCH 5.0 fast-path message into a BookEvent.
+
+    Inverse of _encode_itch() for fast-path types. Used by the round-trip
+    test and by M03 cocotb TBs that need to compute the expected
+    BookEvent from a raw ITCH byte sequence.
+    """
+    if not msg:
+        raise ValueError("empty message")
+    type_byte = msg[:1]
+    if type_byte == b"A":
+        # offsets per _itch_wire.FIELD_OFFSETS[b"A"]
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        side      = 0 if msg[19:20] == b"B" else 1
+        shares    = int.from_bytes(msg[20:24], "big")
+        price     = int.from_bytes(msg[32:36], "big")
+        return BookEvent(EV_ADD, side, symbol_id, price, shares, order_id, ts48)
+    if type_byte == b"D":
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        return BookEvent(EV_DELETE, 0, symbol_id, 0, 0, order_id, ts48)
+    if type_byte == b"X":
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        cancelled = int.from_bytes(msg[19:23], "big")
+        return BookEvent(EV_CANCEL, 0, symbol_id, 0, cancelled, order_id, ts48)
+    if type_byte == b"E":
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        executed  = int.from_bytes(msg[19:23], "big")
+        return BookEvent(EV_EXEC, 0, symbol_id, 0, executed, order_id, ts48)
+    if type_byte == b"C":
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        executed  = int.from_bytes(msg[19:23], "big")
+        price     = int.from_bytes(msg[32:36], "big")
+        return BookEvent(EV_EXECPX, 0, symbol_id, price, executed, order_id, ts48)
+    if type_byte == b"F":
+        # F has same first 36 bytes as A plus 4-byte MPID; identical decode.
+        symbol_id = int.from_bytes(msg[1:3],  "big")
+        ts48      = int.from_bytes(msg[5:11], "big")
+        order_id  = int.from_bytes(msg[11:19], "big")
+        side      = 0 if msg[19:20] == b"B" else 1
+        shares    = int.from_bytes(msg[20:24], "big")
+        price     = int.from_bytes(msg[32:36], "big")
+        return BookEvent(EV_ADD, side, symbol_id, price, shares, order_id, ts48)
+    if type_byte == b"U":
+        # Replace splits into DELETE + ADD; this Python decoder returns the
+        # ADD half (downstream cocotb golden uses _split_replace() for both).
+        symbol_id    = int.from_bytes(msg[1:3],   "big")
+        ts48         = int.from_bytes(msg[5:11],  "big")
+        new_order_id = int.from_bytes(msg[19:27], "big")
+        shares       = int.from_bytes(msg[27:31], "big")
+        price        = int.from_bytes(msg[31:35], "big")
+        return BookEvent(EV_ADD, 0, symbol_id, price, shares, new_order_id, ts48)
+    raise ValueError(f"unsupported ITCH type {type_byte!r}")
+
+
+def _split_replace(msg: bytes) -> tuple[BookEvent, BookEvent]:
+    """Decode an ITCH `U` (Replace) into the equivalent (DELETE, ADD) pair.
+
+    The decoder RTL emits these two events back-to-back. This helper lets
+    the cocotb golden compute the expected pair from a Replace message.
+    """
+    if msg[:1] != b"U":
+        raise ValueError(f"_split_replace called on non-Replace message {msg[:1]!r}")
+    symbol_id      = int.from_bytes(msg[1:3],   "big")
+    ts48           = int.from_bytes(msg[5:11],  "big")
+    orig_order_id  = int.from_bytes(msg[11:19], "big")
+    new_order_id   = int.from_bytes(msg[19:27], "big")
+    shares         = int.from_bytes(msg[27:31], "big")
+    price          = int.from_bytes(msg[31:35], "big")
+    delete_ev = BookEvent(EV_DELETE, 0, symbol_id, 0, 0, orig_order_id, ts48)
+    add_ev    = BookEvent(EV_ADD,    0, symbol_id, price, shares, new_order_id, ts48)
+    return delete_ev, add_ev
+
+
+# Slow-path message lengths (subset; not exhaustive — only what M03 TBs
+# need to exercise the decoder's drop-with-counter path).
+_SLOW_PATH_LENGTHS: dict[bytes, int] = {
+    b"R": 39,  # Stock Directory
+    b"S": 12,  # System Event
+    b"H": 25,  # Stock Trading Action
+}
+
+
+def _encode_itch_slow_path(type_byte: bytes) -> bytes:
+    """Encode a slow-path ITCH message as [type][N-1 × 0xFF].
+
+    The decoder's type-dispatch stage consumes the type byte, looks up
+    the message length, advances past the body, and bumps the
+    slow_path_dropped counter. The body content is irrelevant — dummy
+    0xFF lets us confirm the decoder doesn't accidentally interpret it.
+    """
+    if type_byte not in _SLOW_PATH_LENGTHS:
+        raise ValueError(f"unknown slow-path type {type_byte!r}")
+    return type_byte + b"\xff" * (_SLOW_PATH_LENGTHS[type_byte] - 1)
+
+
 def _encode_itch(ev: BookEvent) -> bytes:
-    # Minimal ITCH 5.0 encoding. Fully-fledged NASDAQ 5.0 compliance is
-    # validated in M03/M04 against an independent parser. For M02 we just
-    # need a deterministic byte sequence that round-trips via _decode_itch.
+    """Encode a BookEvent as a real ITCH 5.0 wire-format message.
+
+    FROZEN at M03 (upgraded from the M02 placeholder). Per-type layouts
+    follow NASDAQ TVITCH 5.0 v5.0. Multi-byte fields are big-endian.
+    Stock symbol is 8 ASCII bytes right-padded with spaces; tracking
+    number, timestamp, MPID are filled with deterministic-but-uninteresting
+    values derived from ingress_ts so the encoder remains pure.
+
+    Slow-path types: see _encode_itch_slow_path() — emits dummy payload of
+    spec-correct length so the decoder's pre-filter is exercised without
+    needing a full slow-path encoder.
+    """
+    ts48 = ev.ingress_ts & ((1 << 48) - 1)
+    ts_bytes = ts48.to_bytes(6, "big")
+    stock_locate = ev.symbol_id & 0xFFFF
+    tracking = (ev.ingress_ts >> 16) & 0xFFFF
+    stock_str = f"SYM{ev.symbol_id:05d}"[:8].ljust(8, " ").encode("ascii")
+
     if ev.type == EV_ADD:
-        return b"A" + struct.pack(">HHIQH6sIQ",
-            0, ev.symbol_id, ev.ingress_ts & 0xFFFFFFFF,
-            ev.order_id, ev.shares, b"SYMBOL", ev.price, ev.ingress_ts >> 32) + bytes([ev.side])
+        side_byte = b"B" if ev.side == 0 else b"S"
+        return (
+            b"A"
+            + stock_locate.to_bytes(2, "big")
+            + tracking.to_bytes(2, "big")
+            + ts_bytes
+            + ev.order_id.to_bytes(8, "big")
+            + side_byte
+            + ev.shares.to_bytes(4, "big")
+            + stock_str
+            + ev.price.to_bytes(4, "big")
+        )
     if ev.type == EV_DELETE:
-        return b"D" + struct.pack(">HHIQ", 0, 0, ev.ingress_ts & 0xFFFFFFFF, ev.order_id)
+        return (
+            b"D"
+            + stock_locate.to_bytes(2, "big")
+            + tracking.to_bytes(2, "big")
+            + ts_bytes
+            + ev.order_id.to_bytes(8, "big")
+        )
     if ev.type == EV_CANCEL:
-        return b"X" + struct.pack(">HHIQI",
-            0, 0, ev.ingress_ts & 0xFFFFFFFF, ev.order_id, ev.shares)
+        return (
+            b"X"
+            + stock_locate.to_bytes(2, "big")
+            + tracking.to_bytes(2, "big")
+            + ts_bytes
+            + ev.order_id.to_bytes(8, "big")
+            + ev.shares.to_bytes(4, "big")
+        )
     if ev.type == EV_EXEC:
-        return b"E" + struct.pack(">HHIQIQ",
-            0, 0, ev.ingress_ts & 0xFFFFFFFF, ev.order_id, ev.shares, 0)
+        match_number = ev.order_id ^ ts48  # deterministic, uninteresting
+        return (
+            b"E"
+            + stock_locate.to_bytes(2, "big")
+            + tracking.to_bytes(2, "big")
+            + ts_bytes
+            + ev.order_id.to_bytes(8, "big")
+            + ev.shares.to_bytes(4, "big")
+            + match_number.to_bytes(8, "big")
+        )
+    if ev.type == EV_EXECPX:
+        match_number = ev.order_id ^ ts48
+        return (
+            b"C"
+            + stock_locate.to_bytes(2, "big")
+            + tracking.to_bytes(2, "big")
+            + ts_bytes
+            + ev.order_id.to_bytes(8, "big")
+            + ev.shares.to_bytes(4, "big")
+            + match_number.to_bytes(8, "big")
+            + b"Y"
+            + ev.price.to_bytes(4, "big")
+        )
     return b""
