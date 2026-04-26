@@ -34,8 +34,12 @@ __pycache__/
 
 # cocotb / Verilator
 sim_build/
+sim_build_*/
 results.xml
 obj_dir/
+*.fst
+*.vcd
+dump.fst
 
 # C++ build output
 *.o
