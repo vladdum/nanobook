@@ -1,0 +1,5 @@
+TOPLEVEL := extract_exec
+MODULE   := tb_extract_exec
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+                   $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/extract_exec.sv)
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

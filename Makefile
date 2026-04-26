@@ -54,6 +54,10 @@ clean:
 	$(MAKE) -C hw/synth clean
 	rm -rf build .Xil *.jou *.log *.str
 	rm -rf sw/refbook/build sw/refbook/bench-build sw/refbook/_skbuild sw/refbook/dist
+	rm -rf dv/unit/itch_decoder/sim_build dv/unit/itch_decoder/sim_build_*
+	rm -f  dv/unit/itch_decoder/results.xml dv/unit/itch_decoder/*.fst dv/unit/itch_decoder/*.vcd
+	rm -rf sim_build sim_build_*
+	rm -f  dump.fst *.fst *.vcd results.xml
 
 clean-all: clean
 	find hw/ip -name "*.xci" -delete
