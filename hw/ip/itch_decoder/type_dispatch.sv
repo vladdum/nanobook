@@ -4,8 +4,10 @@
 // input frame and fans the entire frame out to one of six mutually-exclusive
 // AXI-S output lanes. Backpressure is fully honoured: s_tready mirrors the
 // active lane's tready once the lane is locked in.
-
-`default_nettype none
+//
+// Note: `default_nettype none` removed (was Vivado-incompatible: synth
+// rejected `input logic *_tready` ports under that directive).
+// Other modules in the pipeline don't use it; keeping consistency.
 
 module type_dispatch #(
     parameter int unsigned DATA_W = 64,

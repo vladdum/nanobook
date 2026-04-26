@@ -9,17 +9,6 @@
 // synchronous reset. Verilator SYNCASYNCNET is expected and suppressed here.
 /* verilator lint_off SYNCASYNCNET */
 `include "book_event_pkg.sv"
-`include "mold_strip.sv"
-`include "msg_boundary.sv"
-`include "type_dispatch.sv"
-`include "extract_add.sv"
-`include "extract_exec.sv"
-`include "extract_cancel.sv"
-`include "extract_delete.sv"
-`include "extract_replace.sv"
-`include "field_extract.sv"
-`include "endian_swap.sv"
-`include "event_pack.sv"
 
 module itch_decoder #(
     parameter int unsigned IN_DATA_W  = 64,
