@@ -35,9 +35,7 @@ module msg_boundary #(
     output logic [DATA_W-1:0]   m_tdata,
     output logic [DATA_W/8-1:0] m_tkeep,
     output logic                m_tvalid,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic                m_tready,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic                m_tlast,
     output logic [TS_W-1:0]     m_tuser,
 
@@ -103,8 +101,10 @@ module msg_boundary #(
     assign m_tuser         = m_tuser_q;
     assign frame_malformed = malformed_q;
 
-    // s_tready: accept new beat only when hold is empty
-    assign s_tready = !hold_valid;
+    // s_tready: accept new beat only when hold is empty AND output is not stalling us.
+    // We cannot consume the hold register while m_tvalid_q=1 and m_tready=0 because
+    // the FSM would overwrite m_tdata_q before downstream has consumed it.
+    assign s_tready = !hold_valid && !(m_tvalid_q && !m_tready);
 
     // -----------------------------------------------------------------------
     // Combinational helpers
@@ -161,14 +161,18 @@ module msg_boundary #(
             m_tuser_q   <= '0;
             malformed_q <= '0;
         end else begin
-            // Deassert output by default; re-asserted below when emitting.
-            m_tvalid_q <= 1'b0;
-            m_tlast_q  <= 1'b0;
+            // Deassert output only when consumed by downstream.
+            if (m_tvalid_q && m_tready) begin
+                m_tvalid_q <= 1'b0;
+                m_tlast_q  <= 1'b0;
+            end
 
             // -----------------------------------------------------------------
-            // Accept new input beat when hold is empty.
+            // Accept new input beat when hold is empty AND we are not stalling.
+            // (s_tready combinationally gates upstream, but we also gate here to
+            // keep hold_valid consistent with the handshake.)
             // -----------------------------------------------------------------
-            if (!hold_valid && s_tvalid) begin
+            if (!hold_valid && s_tvalid && s_tready) begin
                 hold_data  <= s_tdata;
                 hold_keep  <= s_tkeep;
                 hold_last  <= s_tlast;
@@ -179,10 +183,9 @@ module msg_boundary #(
 
             // -----------------------------------------------------------------
             // ST_DRAIN: flush partial output buffer as a TLAST beat.
-            // This runs independent of hold_valid (we may have just refilled
-            // hold on the same cycle — that's fine, DRAIN wins this cycle).
+            // Stall if output register is still occupied (not yet consumed).
             // -----------------------------------------------------------------
-            if (state == ST_DRAIN) begin
+            if (state == ST_DRAIN && !(m_tvalid_q && !m_tready)) begin
                 m_tdata_q  <= obuf_data;
                 m_tkeep_q  <= obuf_keep;
                 m_tvalid_q <= 1'b1;
@@ -194,7 +197,7 @@ module msg_boundary #(
                 state      <= ST_LEN0;
                 // If we just loaded a new beat this cycle, keep hold_valid as set.
                 // (hold was empty before; the load-path above may have set it.)
-            end else if (hold_valid) begin
+            end else if (hold_valid && !(m_tvalid_q && !m_tready)) begin
                 // -----------------------------------------------------------------
                 // Byte-pump FSM: consume one byte per clock from hold register.
                 // -----------------------------------------------------------------
