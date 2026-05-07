@@ -7,6 +7,11 @@ and emits top-of-book deltas over PCIe via Xilinx XDMA.
 **Headline target:** frame-to-top-of-book-update latency p99.99 ≤ 500 ns, bit-exact against a
 reference C++ book on three pinned NASDAQ trading days.
 
+> **Research prototype, not production trading software.** This repository is a personal
+> learning/research project. It is not a supported product, has no SLA, has not been audited
+> for security, and must not be used in any production trading or market-data path. See
+> [`SECURITY.md`](SECURITY.md) and [`LICENSE`](LICENSE) (Apache 2.0, no warranty).
+
 Full architecture: [`docs/design.md`](docs/design.md).
 
 ## Status
@@ -157,6 +162,15 @@ make verify-pcaps     # Verify pcap SHA-256 checksums
 make gen-ber-pcap     # Generate synthetic frames for the BER test
 make clean            # Remove build artifacts
 ```
+
+### Market data
+
+The reference captures used by `make fetch-pcaps` are public NASDAQ TotalView-ITCH 5.0
+sample files (e.g., `emi.nasdaq.com/ITCH/`). They are **not redistributed** in this
+repository — `data/pcaps/` is gitignored and the files are downloaded directly from
+NASDAQ's mirror at fetch time. Users are responsible for complying with NASDAQ's terms
+for use of the data. See `data/pcaps/fetch.sh` for the exact source URLs and the pinned
+trading days.
 
 ## Module-Level Testbenches
 
