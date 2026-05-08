@@ -4,7 +4,8 @@ VIVADO ?= vivado
 
 .PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap \
         clean clean-all refbook refbook-test refbook-bench \
-        itch-decoder-codegen-check itch-decoder-test itch-decoder-lint
+        itch-decoder-codegen-check itch-decoder-test itch-decoder-lint \
+        m04-cosim-slice
 
 help:
 	@echo "Nanobook — available targets:"
@@ -21,6 +22,7 @@ help:
 	@echo "  itch-decoder-codegen-check  Re-run codegen, assert no diff vs committed package"
 	@echo "  itch-decoder-test  Run cocotb suite for itch_decoder under Verilator"
 	@echo "  itch-decoder-lint  Verilator lint of itch_decoder RTL"
+	@echo "  m04-cosim-slice    Run M04 cosim against committed 100 K-msg slices (Phase G+)"
 	@echo "  clean          Remove build artifacts"
 
 shell:
@@ -90,3 +92,6 @@ itch-decoder-lint:
 	verilator --lint-only -Wall -Wno-DECLFILENAME \
 	  -Ihw/ip/itch_decoder \
 	  hw/ip/itch_decoder/itch_decoder.sv
+
+m04-cosim-slice:
+	@bash dv/integration/m04_cosim/run_slices.sh
