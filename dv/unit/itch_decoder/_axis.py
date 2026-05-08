@@ -78,3 +78,59 @@ async def reset(dut, *, cycles: int = 4) -> None:
         await RisingEdge(dut.clk)
     dut.rstn.value = 1
     await RisingEdge(dut.clk)
+
+
+# ─── M04 cosim helpers ───────────────────────────────────────────────────────────
+
+
+async def drive_beats(dut, beats) -> None:
+    """Drive a sequence of pre-framed (tdata, tkeep, tlast) tuples into the
+    decoder's AXI-S input. Used by M04 cosim, where MoldUDP framing is built
+    upstream by sw.replay.replay.iter_beats.
+
+    Matches drive_payload's pattern: sample s_tready after RisingEdge in the
+    writable phase. Do NOT `await ReadOnly()` here — leaving the loop body in
+    ReadOnly would block the next iteration's signal writes ("Attempting
+    settings a value during the ReadOnly phase" in cocotb 2.0).
+    """
+    for tdata, tkeep, tlast in beats:
+        dut.s_tdata.value  = tdata
+        dut.s_tkeep.value  = tkeep
+        dut.s_tlast.value  = tlast
+        dut.s_tuser.value  = 0  # ingress_ts unused for M04 wire-correctness
+        dut.s_tvalid.value = 1
+        await RisingEdge(dut.clk)
+        # Backpressure: wait for the cycle in which s_tready is high.
+        while int(dut.s_tready.value) == 0:
+            await RisingEdge(dut.clk)
+    dut.s_tvalid.value = 0
+    dut.s_tlast.value  = 0
+
+
+async def capture_book_events(dut, into) -> None:
+    """Capture every accepted m_* beat as a 32-byte BookEvent record.
+
+    The decoder emits one event per beat (m_tdata is 256 bits = 32 B), so
+    every (m_tvalid && m_tready) handshake yields one record. m_tlast is
+    asserted on every beat in this configuration.
+    """
+    from cocotb.triggers import ReadOnly
+    from sw.refbook.synthetic_gen import BookEvent
+
+    dut.m_tready.value = 1
+    while True:
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.m_tvalid.value) and int(dut.m_tready.value):
+            data = int(dut.m_tdata.value)
+            ev = BookEvent(
+                type=data & 0xFF,
+                side=(data >> 8) & 0xFF,
+                symbol_id=(data >> 16) & 0xFFFF,
+                price=(data >> 32) & 0xFFFFFFFF,
+                shares=(data >> 64) & 0xFFFFFFFF,
+                # bits 96..127 = _pad (skipped — not on dataclass)
+                order_id=(data >> 128) & 0xFFFFFFFFFFFFFFFF,
+                ingress_ts=(data >> 192) & 0xFFFFFFFFFFFFFFFF,
+            )
+            into.append(ev)

@@ -116,10 +116,13 @@ flowchart LR
 
 ## 3. ITCH 5.0 decoder
 
-**Status:** implemented in M03. RTL under `hw/ip/itch_decoder/` (13 SV files: top, six pipeline
-stages, five per-type extractors, and the `book_event_pkg` package). Vivado OOC synth meets
-400 MHz on xcu50 (WNS +0.736 ns at 2.5 ns period); detailed spec at
-`docs/superpowers/specs/2026-04-26-nanobook-m03-itch-decoder-design.md`.
+**Status:** implemented in M03 (RTL under `hw/ip/itch_decoder/`, 13 SV files: top, six
+pipeline stages, five per-type extractors, and the `book_event_pkg` package; Vivado OOC
+synth meets 400 MHz on xcu50, WNS +0.736 ns at 2.5 ns period; detailed spec at
+`docs/superpowers/specs/2026-04-26-nanobook-m03-itch-decoder-design.md`). M04 validates
+bit-exact against an independent Python parser on three pinned NASDAQ TVITCH 5.0 trading
+days (10 M consecutive fast-path messages per day); see
+`docs/superpowers/specs/2026-04-27-nanobook-m04-real-pcap-validation-design.md`.
 
 ### 3.1 Wire format
 
