@@ -3,17 +3,7 @@ name: lint
 on:
   push:
     branches: [main]
-    paths:
-      - 'hw/**'
-      - 'dv/**'
-      - 'sw/**'
-      - '.github/workflows/**'
   pull_request:
-    paths:
-      - 'hw/**'
-      - 'dv/**'
-      - 'sw/**'
-      - '.github/workflows/**'
 
 env:
   VERILATOR_VERSION: v5.046
