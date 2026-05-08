@@ -298,7 +298,8 @@ names). A rolling EMA updates the midprice. If an incoming price falls outside t
 3. Translates them to new window offsets
 4. Resumes
 
-Rebases are deliberately benchmarked on the book-quake regression day so we know the worst-case stall behavior.
+Rebases are deliberately benchmarked on the stress regression day (`08302019`, month-end
+of the Aug 2019 Yuan-devaluation week) so we know the worst-case stall behavior.
 
 ### 4.5 Next-best discovery
 
