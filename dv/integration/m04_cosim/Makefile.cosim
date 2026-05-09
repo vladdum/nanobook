@@ -1,0 +1,31 @@
+# M04 cosim — drive a NASDAQ historical file through itch_decoder.
+#
+# Required env vars (set by caller):
+#   COSIM_ITCH        Input ITCH file (raw / .gz / .zst).
+#   COSIM_OUT         Output actual_events.bin path.
+#   COSIM_OUT_SLOW    Output slow-path counter path.
+# Optional:
+#   COSIM_MAX_MSGS    Cap input messages.
+
+REPO_ROOT := $(shell git rev-parse --show-toplevel)
+
+TOPLEVEL_LANG := verilog
+TOPLEVEL := itch_decoder
+MODULE   := tb_cosim
+
+VERILOG_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
+                   $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
+
+VERILATOR_FLAGS := -Wall -Wno-DECLFILENAME -I$(REPO_ROOT)/hw/ip/itch_decoder
+EXTRA_ARGS := $(VERILATOR_FLAGS)
+
+SIM := verilator
+SIM_BUILD := sim_build_cosim
+
+# Make Python find:
+#   - this dir (cocotb's MODULE := tb_cosim resolution)
+#   - REPO_ROOT (for `import sw.refbook.*` and `import sw.replay.*`)
+#   - dv/unit/itch_decoder (for `import _axis` style; existing M03 convention)
+export PYTHONPATH := $(REPO_ROOT)/dv/integration/m04_cosim:$(REPO_ROOT):$(REPO_ROOT)/dv/unit/itch_decoder
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

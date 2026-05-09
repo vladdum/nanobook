@@ -1,0 +1,22 @@
+# M04 cosim-slow-mix — hand-built fast/slow mix; asserts slow_path_dropped.
+#
+# Same as Makefile.cosim but with MODULE := tb_cosim_slow_mix.
+
+REPO_ROOT := $(shell git rev-parse --show-toplevel)
+
+TOPLEVEL_LANG := verilog
+TOPLEVEL := itch_decoder
+MODULE   := tb_cosim_slow_mix
+
+VERILOG_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
+                   $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
+
+VERILATOR_FLAGS := -Wall -Wno-DECLFILENAME -I$(REPO_ROOT)/hw/ip/itch_decoder
+EXTRA_ARGS := $(VERILATOR_FLAGS)
+
+SIM := verilator
+SIM_BUILD := sim_build_cosim_slow_mix
+
+export PYTHONPATH := $(REPO_ROOT)/dv/integration/m04_cosim:$(REPO_ROOT):$(REPO_ROOT)/dv/unit/itch_decoder
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
