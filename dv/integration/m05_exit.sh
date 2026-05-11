@@ -31,7 +31,7 @@ make -C dv/unit/lob_core -f Makefile.order_id_hash
 make -C dv/unit/lob_core -f Makefile.price_ladder
 make -C dv/unit/lob_core -f Makefile.tob_tracker
 
-echo "==> [5/8] Cycle-accurate TB asserts (ADD=4, DELETE=5 first-probe)"
+echo "==> [5/8] Cycle-accurate TB asserts (ADD=4, DELETE=6 first-probe, post-2026-05-11 amendment)"
 make -C dv/unit/lob_core -f Makefile.cycles
 
 echo "==> [6/8] Integration cosim 100K slice (CI gate, bit-exact vs refbook)"

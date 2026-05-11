@@ -19,6 +19,24 @@ from cocotb.triggers import RisingEdge
 import _book
 
 
+# Per-test clock with prior-task kill. Each @cocotb.test() runs in the SAME
+# sim invocation against the SAME DUT instance, so without this guard every
+# test would spawn a fresh Clock(dut.clk, 4, "ns").start() coroutine AND the
+# prior tests' generators would still be alive — by test 4, four concurrent
+# generators would race on dut.clk and the throughput test's cycle bounds
+# would break (observed: 64/100 events retired instead of 100 when run after
+# tests 1-3). Killing the prior task before starting a new one keeps exactly
+# one clock generator active per test.
+_clock_task = None
+
+
+def _start_clock(dut) -> None:
+    global _clock_task
+    if _clock_task is not None:
+        _clock_task.kill()
+    _clock_task = cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+
+
 # Must match Makefile.cycles -GSYMBOL_FILTER_ID=42.
 SYM = 42
 
@@ -60,7 +78,7 @@ async def _drive_event_count_cycles_until_delta(dut, ev_word: int, max_cycles: i
 @cocotb.test()
 async def test_add_4_cycles(dut):
     """ADD pipeline: input handshake -> m_tvalid in 4 cycles (spec §6)."""
-    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    _start_clock(dut)
     await _book.reset(dut)
     ev = _book.pack_book_event(
         ev_type=EV_ADD, side=0, symbol_id=SYM,
@@ -81,7 +99,7 @@ async def test_delete_6_cycles_first_probe(dut):
     Non-best DELETE emits no tob_delta (best stays unchanged) so we measure
     completion via the events_in counter, which the orchestrator bumps at
     the END of the pipeline (NOT at input handshake)."""
-    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    _start_clock(dut)
     await _book.reset(dut)
     # Two ADDs at the same price so the DELETE has a non-best target.
     for oid in (1, 2):
@@ -118,7 +136,7 @@ async def test_delete_6_cycles_first_probe(dut):
 @cocotb.test()
 async def test_filtered_event_dropped_no_delta(dut):
     """Wrong-symbol event: events_filtered++, never any tob_delta."""
-    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    _start_clock(dut)
     await _book.reset(dut)
     ev = _book.pack_book_event(
         ev_type=EV_ADD, side=0, symbol_id=SYM + 1,   # wrong symbol
@@ -154,7 +172,7 @@ async def test_steady_state_one_event_per_two_cycles(dut):
     one cycle saw s_tready=0 while s_tvalid=1 (a regression on the stall
     extension would let all 100 ADDs through in <2N cycles, which still
     passes a generous bound but breaks the throughput contract)."""
-    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    _start_clock(dut)
     await _book.reset(dut)
     initial = int(dut.events_in.value)
     dut.m_tready.value = 1
