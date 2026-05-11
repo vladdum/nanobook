@@ -41,6 +41,28 @@ obj_dir/
 *.vcd
 dump.fst
 
+# lob_core unit-TB artefacts (root patterns; per saved feedback, subdir
+# patterns alone don't cover all leaks).
+dv/unit/lob_core/sim_build_*
+dv/unit/lob_core/results.xml
+dv/unit/lob_core/*.fst
+dv/unit/lob_core/*.vcd
+dv/unit/lob_core/__pycache__
+
+# M05 cosim sim_build dirs (per-target via SIM_BUILD env var).
+dv/integration/m05_cosim/sim_build_m05_cosim
+dv/integration/m05_cosim/sim_build_m05_fullday
+dv/integration/m05_cosim/results.xml
+dv/integration/m05_cosim/__pycache__
+
+# M05 Vivado OOC synth artefacts (Phase K).
+hw/synth/lob_core/build/
+hw/synth/lob_core/vivado*.log
+hw/synth/lob_core/vivado*.jou
+hw/synth/lob_core/vivado*.backup.log
+hw/synth/lob_core/vivado*.backup.jou
+hw/synth/lob_core/.Xil/
+
 # C++ build output
 *.o
 *.so
@@ -52,8 +74,18 @@ data/pcaps/*.pcap
 data/pcaps/*.gz
 data/pcaps/*.NASDAQ_ITCH50
 
+# M05 goldens — derived from m04_exit.sh 10M-msg sweep, regeneratable.
+# checksums.sha256 IS committed (force-added) so verify-goldens has a
+# pinned reference; the .events.bin payloads themselves (~300 MB each)
+# are not.
+data/golden/*.events.bin
+
 # Local planning scratch (roadmap + per-month plans live here, local-only)
 docs/superpowers/
+
+# M05 Phase B local-only reports + sidecar JSON (parameters baked into
+# hw/ip/lob_core/lob_core_params_pkg.sv at Task 8).
+docs/m05/
 
 # Claude Code local data (worktrees, memory — never committed)
 .claude/

@@ -83,7 +83,7 @@ async def reset(dut, *, cycles: int = 4) -> None:
 # ─── M04 cosim helpers ───────────────────────────────────────────────────────────
 
 
-async def drive_beats(dut, beats) -> None:
+async def drive_beats(dut, beats, *, progress_every: int = 0) -> None:
     """Drive a sequence of pre-framed (tdata, tkeep, tlast) tuples into the
     decoder's AXI-S input. Used by M04 cosim, where MoldUDP framing is built
     upstream by sw.replay.replay.iter_beats.
@@ -92,7 +92,12 @@ async def drive_beats(dut, beats) -> None:
     writable phase. Do NOT `await ReadOnly()` here — leaving the loop body in
     ReadOnly would block the next iteration's signal writes ("Attempting
     settings a value during the ReadOnly phase" in cocotb 2.0).
+
+    Set `progress_every` to a positive integer to log a "n/total" line every
+    N beats — invaluable for the 10M-msg sweep where one run is ~30 min wall.
     """
+    total = len(beats) if hasattr(beats, "__len__") else None
+    n = 0
     for tdata, tkeep, tlast in beats:
         dut.s_tdata.value  = tdata
         dut.s_tkeep.value  = tkeep
@@ -103,6 +108,12 @@ async def drive_beats(dut, beats) -> None:
         # Backpressure: wait for the cycle in which s_tready is high.
         while int(dut.s_tready.value) == 0:
             await RisingEdge(dut.clk)
+        n += 1
+        if progress_every and (n % progress_every == 0):
+            if total:
+                dut._log.info(f"drive_beats: {n}/{total} ({100*n//total}%)")
+            else:
+                dut._log.info(f"drive_beats: {n} beats")
     dut.s_tvalid.value = 0
     dut.s_tlast.value  = 0
 

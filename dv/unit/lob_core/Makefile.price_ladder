@@ -1,0 +1,10 @@
+TOPLEVEL := price_ladder
+MODULE   := tb_price_ladder
+
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+                   $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv)
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile
+
+# Override window for the TB so the out-of-window check fires on a small range.
+EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=64

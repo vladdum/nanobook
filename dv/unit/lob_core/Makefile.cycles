@@ -1,0 +1,33 @@
+TOPLEVEL := lob_core
+MODULE   := tb_lob_core_cycles
+
+# Source order: book_event_pkg → lob_core_params_pkg → sub-modules → top.
+# All sub-modules must precede lob_core.sv (the top instantiates them).
+VERILOG_SOURCES := \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
+
+# Tiny sim-only sizing — keeps Verilator build + cocotb runtime tractable.
+# Three sizings deviate from the plan-suggested values; the deviations are
+# all consequences of the steady-state TB driving 100 distinct ADDs on
+# 100 distinct prices/order_ids:
+#
+#   WINDOW_SIZE_TICKS: plan=64 -> 128. Plan value rejects events 64..99
+#     as out-of-window, so only 64 of 100 ADDs ever reach the pipeline.
+#   POOL_SLOTS:        plan=64 -> 256. With slots NOT freed until DEL,
+#     100 in-flight allocations exhaust a 64-slot pool.
+#   HASH_SLOTS:        plan=128 -> 512. With 128 buckets and 100 keys
+#     (xorshift64), the birthday-paradox collision count (~30) eats more
+#     than the 20-cycle drain budget. 512 keeps expected collisions ≤ 10.
+#
+# These are sim-only Verilator overrides — the synthesis-time values come
+# from lob_core_params_pkg.sv (Phase B pinned).
+EXTRA_ARGS += -GSYMBOL_FILTER_ID=42 -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=128
+EXTRA_ARGS += -GPOOL_SLOTS=256 -GHASH_SLOTS=512
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

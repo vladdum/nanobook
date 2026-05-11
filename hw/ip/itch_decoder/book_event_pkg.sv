@@ -1,4 +1,4 @@
-// AUTO-GENERATED FROM sw/refbook/include/refbook/book_event.h
+// AUTO-GENERATED FROM sw/refbook/include/refbook/book_event.h + tob_delta.h
 // DO NOT EDIT BY HAND. Run hw/ip/itch_decoder/scripts/gen_book_event_pkg.py
 // to regenerate. CI asserts `git diff --exit-code` against this file.
 
@@ -28,6 +28,28 @@ package book_event_pkg;
     logic [63:0] order_id;
     logic [63:0] ingress_ts;
   } book_event_t;
+
+  // tob_reason_e — mirrors enum class TobReason : uint8_t
+  typedef enum logic [7:0] {
+    TOB_REASON_ADD     = 8'h00,
+    TOB_REASON_CANCEL  = 8'h01,
+    TOB_REASON_DELETE  = 8'h02,
+    TOB_REASON_EXEC    = 8'h03,
+    TOB_REASON_EXEC_PX = 8'h04
+  } tob_reason_e;
+
+  // tob_delta_t — mirrors struct TobDelta
+  // total 32 bytes (256 bits) — mirrors C++ layout
+  typedef struct packed {
+    logic [63:0] ingress_ts;
+    logic [63:0] emit_ts;
+    logic [15:0] symbol_id;
+    logic [7:0]  side;
+    logic [7:0]  reason;
+    logic [31:0] new_best_price;
+    logic [31:0] new_best_size;
+    logic [31:0] flags;
+  } tob_delta_t;
 
 endpackage : book_event_pkg
 

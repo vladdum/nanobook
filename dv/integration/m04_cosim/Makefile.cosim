@@ -17,10 +17,19 @@ VERILOG_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
                    $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
 
 VERILATOR_FLAGS := -Wall -Wno-DECLFILENAME -I$(REPO_ROOT)/hw/ip/itch_decoder
+# Threaded model: V_THREADS overridable per-invocation. Default 4 trades CPU
+# for wall-time; set to 1 for the single-threaded baseline.
+V_THREADS ?= 4
+ifneq ($(V_THREADS),1)
+VERILATOR_FLAGS += --threads $(V_THREADS)
+endif
 EXTRA_ARGS := $(VERILATOR_FLAGS)
 
 SIM := verilator
-SIM_BUILD := sim_build_cosim
+# COSIM_TAG namespaces sim_build so concurrent invocations (parallel days)
+# don't clobber each other. Defaults to "default" for legacy callers.
+COSIM_TAG ?= default
+SIM_BUILD := sim_build_cosim_$(COSIM_TAG)
 
 # Make Python find:
 #   - this dir (cocotb's MODULE := tb_cosim resolution)
