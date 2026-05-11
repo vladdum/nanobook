@@ -1,5 +1,14 @@
-TOPLEVEL := lob_core
-MODULE   := tb_lob_core_cycles
+TOPLEVEL  := lob_core
+MODULE    := tb_lob_core_cycles
+# Use a dedicated sim_build dir so Verilator's -G parameter overrides
+# (WINDOW_SIZE_TICKS=128, POOL_SLOTS=256 below) don't collide with the
+# smoke TB's compiled binary in sim_build_lob_core (which uses 64/64 and
+# also has TOPLEVEL=lob_core). Verilator bakes -G values at compile time,
+# so a shared dir silently reuses whichever binary built first — exactly
+# the failure mode that m05_exit.sh step 4 → step 5 hit: smoke compiled
+# Vtop with WINDOW_SIZE_TICKS=64, then cycles reused it and only 64 of
+# 100 events fit the window.
+SIM_BUILD := sim_build_lob_core_cycles
 
 # Source order: book_event_pkg → lob_core_params_pkg → sub-modules → top.
 # All sub-modules must precede lob_core.sv (the top instantiates them).
