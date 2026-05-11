@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Cocotb + Verilator harness for hw/ip/lob_core/tob_tracker.sv
+#
+# Small-window override (WINDOW_SIZE_TICKS=64) keeps the Verilator
+# build + test runtime tractable; full-window verification happens at
+# the cycle-accurate TB in Phase H and the integration cosim in Phase I.
+
+TOPLEVEL := tob_tracker
+COCOTB_TEST_MODULES := tb_tob_tracker
+MODULE := tb_tob_tracker
+
+VERILOG_SOURCES := \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv)
+
+EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=64
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

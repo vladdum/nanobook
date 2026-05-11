@@ -3,9 +3,10 @@ SHELL := /bin/bash
 VIVADO ?= vivado
 
 .PHONY: help shell hbm-smoke 10g-loopback lint fetch-pcaps verify-pcaps gen-ber-pcap \
-        clean clean-all refbook refbook-test refbook-bench \
+        clean clean-all clean-goldens refbook refbook-test refbook-bench \
         itch-decoder-codegen-check itch-decoder-test itch-decoder-lint \
-        m04-cosim-slice
+        lob-core-test lob-core-lint lob-core-synth \
+        m04-cosim-slice verify-goldens
 
 help:
 	@echo "Nanobook — available targets:"
@@ -15,6 +16,8 @@ help:
 	@echo "  lint           Verilator lint on all RTL"
 	@echo "  fetch-pcaps    Download pinned NASDAQ ITCH pcaps"
 	@echo "  verify-pcaps   Verify pcap SHA-256 checksums"
+	@echo "  verify-goldens Verify M05 frozen-golden SHA-256 checksums"
+	@echo "  clean-goldens  Remove regeneratable data/golden/*.events.bin"
 	@echo "  gen-ber-pcap   Generate synthetic frame stream for the BER test"
 	@echo "  refbook        Build C++ refbook (static lib + Python module)"
 	@echo "  refbook-test   Build + test refbook (with coverage)"
@@ -22,6 +25,9 @@ help:
 	@echo "  itch-decoder-codegen-check  Re-run codegen, assert no diff vs committed package"
 	@echo "  itch-decoder-test  Run cocotb suite for itch_decoder under Verilator"
 	@echo "  itch-decoder-lint  Verilator lint of itch_decoder RTL"
+	@echo "  lob-core-test      Run cocotb smoke TB for lob_core under Verilator (M05)"
+	@echo "  lob-core-lint      Verilator lint of lob_core RTL (M05)"
+	@echo "  lob-core-synth     Vivado OOC synth for lob_core (Phase K)"
 	@echo "  m04-cosim-slice    Run M04 cosim against committed 100 K-msg slices (Phase G+)"
 	@echo "  clean          Remove build artifacts"
 
@@ -45,6 +51,12 @@ fetch-pcaps:
 verify-pcaps:
 	cd data/pcaps && sha256sum --check checksums.sha256
 
+verify-goldens:
+	@cd data/golden && sha256sum -c checksums.sha256
+
+clean-goldens:
+	@rm -rf data/golden/*.events.bin
+
 gen-ber-pcap:
 	python3 -c "\
 from scapy.all import Ether, wrpcap; \
@@ -52,13 +64,20 @@ frames = [Ether(src='02:00:00:00:01:01', dst='02:00:00:00:01:02') / bytes(range(
           for _ in range(100000)]; \
 wrpcap('dv/integration/data/ber_frames.pcap', frames)"
 
-clean:
+clean: clean-goldens
 	$(MAKE) -C hw/synth clean
 	rm -rf build .Xil *.jou *.log *.str
 	rm -rf sw/refbook/build sw/refbook/bench-build sw/refbook/_skbuild sw/refbook/dist
 	rm -rf dv/unit/itch_decoder/sim_build dv/unit/itch_decoder/sim_build_*
 	rm -f  dv/unit/itch_decoder/results.xml dv/unit/itch_decoder/*.fst dv/unit/itch_decoder/*.vcd
+	rm -rf dv/unit/lob_core/sim_build dv/unit/lob_core/sim_build_*
+	rm -f  dv/unit/lob_core/results.xml dv/unit/lob_core/*.fst dv/unit/lob_core/*.vcd
+	rm -rf dv/integration/m05_cosim/sim_build_m05_cosim dv/integration/m05_cosim/sim_build_m05_fullday
+	rm -rf hw/synth/lob_core/build
+	rm -f  hw/synth/lob_core/vivado*.{log,jou,backup.log,backup.jou}
+	rm -rf hw/synth/lob_core/.Xil/
 	rm -rf sim_build sim_build_*
+	rm -rf dv/integration/m04_cosim/sim_build_cosim*
 	rm -f  dump.fst *.fst *.vcd results.xml
 
 clean-all: clean
@@ -95,3 +114,21 @@ itch-decoder-lint:
 
 m04-cosim-slice:
 	@bash dv/integration/m04_cosim/run_slices.sh
+
+lob-core-test:
+	$(MAKE) -C dv/unit/lob_core -f Makefile.smoke
+
+lob-core-synth:
+	cd hw/synth/lob_core && vivado -mode batch -source synth.tcl
+	python3 hw/synth/lob_core/check_timing.py
+
+lob-core-lint:
+	verilator --lint-only -Wall -Wno-DECLFILENAME \
+	  -Ihw/ip/itch_decoder -Ihw/ip/lob_core \
+	  hw/ip/itch_decoder/book_event_pkg.sv \
+	  hw/ip/lob_core/lob_core_params_pkg.sv \
+	  hw/ip/lob_core/order_pool.sv \
+	  hw/ip/lob_core/order_id_hash.sv \
+	  hw/ip/lob_core/price_ladder.sv \
+	  hw/ip/lob_core/tob_tracker.sv \
+	  hw/ip/lob_core/lob_core.sv

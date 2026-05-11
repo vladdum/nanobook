@@ -52,3 +52,56 @@ jobs:
       - name: Run cosim-slice on all 3 pinned days
         run: bash dv/integration/m04_cosim/run_slices.sh
         timeout-minutes: 10
+
+  m05-cosim-slice:
+    name: m05-cosim-slice
+    runs-on: ubuntu-22.04
+    env:
+      VERILATOR_VERSION: v5.046
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore Verilator cache
+        id: verilator-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-${{ env.VERILATOR_VERSION }}-${{ runner.os }}
+
+      - name: Build Verilator (if cache miss)
+        if: steps.verilator-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git help2man perl python3 make autoconf g++ \
+            flex bison ccache libfl2 libfl-dev zlib1g zlib1g-dev
+          git clone --depth=1 --branch "$VERILATOR_VERSION" \
+            https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure --prefix=/opt/verilator
+          make -j"$(nproc)" && sudo make install
+
+      - name: Add Verilator to PATH
+        run: echo "/opt/verilator/bin" >> "$GITHUB_PATH"
+
+      - name: Install runtime deps
+        run: |
+          sudo apt-get install -y g++ ccache make libfl2 cmake
+
+      - name: Install Python deps
+        run: pip install 'cocotb>=2.0' 'cocotb-test' zstandard pytest pybind11
+
+      - name: Build refbook pybind module
+        run: |
+          mkdir -p sw/refbook/build
+          cd sw/refbook/build
+          cmake -DCMAKE_BUILD_TYPE=Release -DREFBOOK_BUILD_PYTHON=ON ..
+          make -j"$(nproc)" refbook
+
+      - name: Run M05 cosim on the committed slice
+        run: bash dv/integration/m05_cosim/run_slice.sh
+        timeout-minutes: 30

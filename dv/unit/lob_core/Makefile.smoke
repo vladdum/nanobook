@@ -1,0 +1,18 @@
+TOPLEVEL := lob_core
+MODULE   := tb_lob_core_smoke
+# Phase H wires the orchestrator + 4 sub-modules; lob_core_params_pkg now
+# imports + sub-module sources are required here too.
+VERILOG_SOURCES := \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
+
+# Sim-time sizing: small POOL/HASH/window so the Verilator build is fast.
+EXTRA_ARGS += -GSYMBOL_FILTER_ID=42 -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=64
+EXTRA_ARGS += -GPOOL_SLOTS=64 -GHASH_SLOTS=512
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

@@ -1,0 +1,57 @@
+# M05 integration cosim — drive an ITCH slice through itch_decoder + lob_core
+# and bit-compare against sw/refbook (filtered to SYMBOL_FILTER_ID).
+#
+# Required env vars (set by run_slice.sh / CI):
+#   M05_SLICE_ITCH    Path to the per-symbol slice (.zst / .gz / raw).
+#   M05_SYMBOL_ID     Integer symbol_id (matches lob_core_params_pkg).
+# Optional:
+#   M05_MAX_MSGS      Cap input messages (debug).
+#   M05_DRAIN_CYCLES  Cycles to wait after drive completes (default 256).
+#   V_THREADS         Verilator thread count (default 4).
+
+REPO_ROOT := $(shell git rev-parse --show-toplevel)
+
+TOPLEVEL_LANG := verilog
+TOPLEVEL := decoder_lob_top
+MODULE   := tb_cosim
+
+# Source order: packages first, then sub-modules, then top-level wrappers,
+# then the cosim wrapper. $(wildcard) on the itch_decoder dir picks up
+# every *.sv (the package and itch_decoder.sv must be ordered explicitly).
+ITCH_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
+                $(filter-out %/book_event_pkg.sv %/itch_decoder.sv, \
+                    $(wildcard $(REPO_ROOT)/hw/ip/itch_decoder/*.sv)) \
+                $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
+
+LOB_SOURCES := $(REPO_ROOT)/hw/ip/lob_core/lob_core_params_pkg.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/order_pool.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/order_id_hash.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/price_ladder.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/tob_tracker.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/lob_core.sv
+
+VERILOG_SOURCES := $(ITCH_SOURCES) $(LOB_SOURCES) \
+                   $(REPO_ROOT)/dv/integration/m05_cosim/decoder_lob_top.sv
+
+VERILATOR_FLAGS := -Wall -Wno-DECLFILENAME -Wno-fatal -Wno-UNUSEDSIGNAL \
+                   -I$(REPO_ROOT)/hw/ip/itch_decoder \
+                   -I$(REPO_ROOT)/hw/ip/lob_core
+
+V_THREADS ?= 4
+ifneq ($(V_THREADS),1)
+VERILATOR_FLAGS += --threads $(V_THREADS)
+endif
+EXTRA_ARGS := $(VERILATOR_FLAGS)
+
+SIM := verilator
+SIM_BUILD := sim_build_m05_cosim
+
+# Python module search path:
+#   - this dir          (cocotb resolves MODULE := tb_cosim)
+#   - REPO_ROOT         (sw.replay, sw.refbook imports)
+#   - dv/unit/lob_core  (_book.unpack_tob_delta)
+#   - dv/unit/itch_decoder (_axis.drive_beats)
+#   - sw/refbook/build  (refbook pybind .so)
+export PYTHONPATH := $(REPO_ROOT)/dv/integration/m05_cosim:$(REPO_ROOT):$(REPO_ROOT)/dv/unit/lob_core:$(REPO_ROOT)/dv/unit/itch_decoder:$(REPO_ROOT)/sw/refbook/build
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

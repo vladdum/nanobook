@@ -47,9 +47,15 @@ async def test_cosim(dut):
     captured: list[BookEvent] = []
     cap_task = cocotb.start_soon(capture_book_events(dut, captured))
 
-    # Drive replay beats.
+    # Drive replay beats. Log progress every 500K beats — the 10M-msg sweep
+    # is tens of minutes wall and the per-day cosim log is otherwise silent
+    # between the "Running tests" banner and the final summary. With ~25
+    # beats per ITCH msg the 10M-msg input is ~250M beats, so 500K = ~500
+    # progress lines / day — chatty but cheap, and lets the orchestrator
+    # confirm liveness from outside.
     beats = list(replay.iter_beats(src, max_messages=max_msgs))
-    await drive_beats(dut, beats)
+    dut._log.info(f"cosim: driving {len(beats)} AXI-S beats from {src}")
+    await drive_beats(dut, beats, progress_every=500_000)
 
     # Drain — wait for the pipeline to flush.
     for _ in range(64):

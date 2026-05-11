@@ -10,7 +10,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "hw" / "ip" / "itch_decoder" / "scripts"))
 
-from gen_book_event_pkg import parse_header, render_package
+from gen_book_event_pkg import (
+    generate,
+    parse_header,
+    parse_tob_header,
+    render_package,
+)
 
 
 def test_parse_header_extracts_event_type_enum():
@@ -101,3 +106,64 @@ def test_render_package_field_order_matches_cpp():
     }
     out = render_package(parsed)
     assert out.index("logic [7:0]  a;") < out.index("logic [15:0] b;")
+
+
+# ───────── M05: tob_delta_t / tob_reason_e codegen ─────────
+
+
+def test_parse_tob_header_extracts_reason_enum():
+    src = REPO_ROOT / "sw" / "refbook" / "include" / "refbook" / "tob_delta.h"
+    parsed = parse_tob_header(src.read_text())
+    assert parsed["event_type"] == [
+        ("Add",    0),
+        ("Cancel", 1),
+        ("Delete", 2),
+        ("Exec",   3),
+        ("ExecPx", 4),
+    ]
+
+
+def test_parse_tob_header_extracts_struct_fields():
+    src = REPO_ROOT / "sw" / "refbook" / "include" / "refbook" / "tob_delta.h"
+    parsed = parse_tob_header(src.read_text())
+    # Must match TobDelta C++ layout exactly (frozen at M02).
+    assert parsed["fields"] == [
+        ("ingress_ts",     "uint64_t", 8),
+        ("emit_ts",        "uint64_t", 8),
+        ("symbol_id",      "uint16_t", 2),
+        ("side",           "uint8_t",  1),
+        ("reason",         "uint8_t",  1),
+        ("new_best_price", "uint32_t", 4),
+        ("new_best_size",  "uint32_t", 4),
+        ("flags",          "uint32_t", 4),
+    ]
+
+
+def test_emits_tob_delta_struct() -> None:
+    """The generated package must contain a packed tob_delta_t struct that
+    mirrors sw/refbook/include/refbook/tob_delta.h field-for-field."""
+    sv = generate()
+    assert "typedef struct packed" in sv
+    assert "tob_delta_t" in sv
+    for field in ("ingress_ts", "emit_ts", "symbol_id", "side",
+                  "reason", "new_best_price", "new_best_size", "flags"):
+        assert field in sv, f"missing field {field} in generated package"
+
+
+def test_tob_delta_reason_enum_present() -> None:
+    sv = generate()
+    assert "tob_reason_e" in sv
+    assert "TOB_REASON_ADD" in sv
+    assert "TOB_REASON_EXEC_PX" in sv
+
+
+def test_book_event_unchanged_when_tob_added():
+    """Frozen-invariant guard: adding tob_delta_t must NOT alter the
+    existing book_event_t / event_type_e emission."""
+    sv = generate()
+    # M03 frozen invariants:
+    assert "package book_event_pkg;" in sv
+    assert "} book_event_t;" in sv
+    assert "} event_type_e;" in sv
+    assert "EV_EXEC_PX = 8'h04" in sv
+    assert "logic [7:0]  ev_type;" in sv  # SV-keyword rename preserved

@@ -1,0 +1,8 @@
+TOPLEVEL := order_pool
+MODULE   := tb_order_pool
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv)
+
+# Override POOL_SLOTS to a tiny value for exhaustion testing.
+EXTRA_ARGS += -GPOOL_SLOTS=16
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

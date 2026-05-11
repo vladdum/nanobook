@@ -1,0 +1,11 @@
+TOPLEVEL := order_id_hash
+MODULE   := tb_order_id_hash
+# lob_core_params_pkg.sv must precede order_id_hash.sv — the module's
+# parameter defaults reference the package.
+VERILOG_SOURCES := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+                   $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv)
+
+# Shrink the table to fit in a quick sim run; MAX_PROBE_DEPTH stays at 4 (spec).
+EXTRA_ARGS += -GHASH_SLOTS=64 -GMAX_PROBE_DEPTH=4
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile
