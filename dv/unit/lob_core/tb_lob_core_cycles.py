@@ -37,8 +37,10 @@ def _start_clock(dut) -> None:
     _clock_task = cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
 
 
-# Must match Makefile.cycles -GSYMBOL_FILTER_ID=42.
-SYM = 42
+# M06 E.2: lob_core now filters via sym_idx_lut (NOT SYMBOL_FILTER_ID). Use a
+# stock_locate that's in the picked-100 LUT — locate=5754 (AAPL) maps to
+# sym_idx=0 in lob_core_sym_pkg::STOCK_LOCATE_TO_SYM_IDX.
+SYM = 5754
 
 # event_type_e mirror (book_event_pkg.sv): A=0, X=1 (cancel), D=2, E=3, ExecPx=4.
 EV_ADD = 0

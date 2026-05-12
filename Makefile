@@ -6,7 +6,8 @@ VIVADO ?= vivado
         clean clean-all clean-goldens refbook refbook-test refbook-bench \
         itch-decoder-codegen-check itch-decoder-test itch-decoder-lint \
         lob-core-test lob-core-lint lob-core-synth \
-        m04-cosim-slice verify-goldens
+        m04-cosim-slice verify-goldens m06-exit \
+        m06-pick-symbols m06-estimate-leak m06-hash-sim
 
 help:
 	@echo "Nanobook — available targets:"
@@ -47,6 +48,25 @@ lint:
 
 fetch-pcaps:
 	bash data/pcaps/fetch.sh
+
+m06-pick-symbols:
+	python3 -m sw.m06_tools.pick_symbols \
+	    --events data/golden/2019-03-27.events.bin \
+	    --peak-max 50 --n-symbols 100 \
+	    --sv-out hw/ip/lob_core/lob_core_sym_pkg.sv \
+	    --mem-out hw/ip/lob_core/lob_core_sym_init.mem \
+	    --md-out docs/m06/symbol_selection.md
+
+m06-estimate-leak:
+	python3 -m sw.m06_tools.estimate_leak \
+	    --events data/golden/2019-03-27.events.bin \
+	    --mem hw/ip/lob_core/lob_core_sym_init.mem
+
+m06-hash-sim:
+	python3 -m sw.m06_tools.hash_sim_multisym \
+	    --events data/golden/2019-03-27.events.bin \
+	    --mem hw/ip/lob_core/lob_core_sym_init.mem \
+	    --hash-slots 32768
 
 verify-pcaps:
 	cd data/pcaps && sha256sum --check checksums.sha256
@@ -122,11 +142,17 @@ lob-core-synth:
 	cd hw/synth/lob_core && vivado -mode batch -source synth.tcl
 	python3 hw/synth/lob_core/check_timing.py
 
+m06-exit:
+	bash dv/integration/m06_exit.sh
+
 lob-core-lint:
 	verilator --lint-only -Wall -Wno-DECLFILENAME \
 	  -Ihw/ip/itch_decoder -Ihw/ip/lob_core \
 	  hw/ip/itch_decoder/book_event_pkg.sv \
 	  hw/ip/lob_core/lob_core_params_pkg.sv \
+	  hw/ip/lob_core/lob_core_sym_pkg.sv \
+	  hw/ip/lob_core/sym_idx_lut.sv \
+	  hw/ip/lob_core/per_sym_state.sv \
 	  hw/ip/lob_core/order_pool.sv \
 	  hw/ip/lob_core/order_id_hash.sv \
 	  hw/ip/lob_core/price_ladder.sv \

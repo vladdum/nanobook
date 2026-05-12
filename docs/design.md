@@ -293,16 +293,27 @@ each HBM miss on the hash or pool read adds ~100 ns, accounted for in the tail b
 
 Each symbol has a `midprice[sym]` register. The URAM ladder for that symbol covers
 `midprice ± 2K` ticks (±$20 at penny ticks — covers normal intraday moves for most top-100
-names). A rolling EMA updates the midprice. If an incoming price falls outside the window, a
-**rebase** operation:
+names). A rolling EMA (α = 1/16, refbook `kEmaShift`) updates the midprice on every ADD
+event.
 
-1. Pauses the affected symbol for ~100 cycles
-2. Reads all active ticks in the window (bounded by bitmap population)
-3. Translates them to new window offsets
-4. Resumes
+If an incoming price falls outside the window, a **rebase** operation:
+
+1. Discards all active ticks in the window (drop-on-rebase; per refbook M02 FROZEN
+   CONTRACT at `sw/refbook/include/refbook/sliding_window.h`).
+2. Bumps the per-symbol `epoch` counter so previously-inserted orders become unreachable
+   from the ladder.
+3. Sets the new `origin = trigger_price - 2048` and `midprice = trigger_price`.
+
+Pool slots for the dropped orders **leak** in the refbook model; the M05+ RTL inline-frees
+them on subsequent DELETE/X/E/C events via the epoch-stale check (an optimisation invisible
+at the TOB boundary).
 
 Rebases are deliberately benchmarked on the stress regression day (`08302019`, month-end
 of the Aug 2019 Yuan-devaluation week) so we know the worst-case stall behavior.
+
+Earlier drafts of this section ("Reads all active ticks in the window… Translates them to
+new window offsets") were superseded by the M02 refbook FROZEN CONTRACT. Amended 2026-05-12
+in M06.
 
 ### 4.5 Next-best discovery
 

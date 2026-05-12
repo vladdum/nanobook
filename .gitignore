@@ -106,3 +106,12 @@ sw/refbook/dist/
 *.gcov
 lcov.info
 coverage_report/
+
+# M06 local-only reports + sim build dirs
+docs/m06/
+dv/integration/m06_cosim/sim_build*
+dv/integration/m06_bookquake/sim_build*
+dv/unit/lob_core/sim_build_sym_idx_lut
+dv/unit/lob_core/sim_build_per_sym_state
+dv/unit/lob_core/sim_build_lob_core_rebase
+dv/unit/lob_core/sim_build_lob_core_cycles_m06

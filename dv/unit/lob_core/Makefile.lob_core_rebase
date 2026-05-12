@@ -1,7 +1,7 @@
-TOPLEVEL := lob_core
-MODULE   := tb_lob_core_smoke
-# Phase H wires the orchestrator + 4 sub-modules; lob_core_params_pkg now
-# imports + sub-module sources are required here too.
+TOPLEVEL  := lob_core
+MODULE    := tb_lob_core_rebase
+SIM_BUILD := sim_build_lob_core_rebase
+
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
@@ -14,10 +14,7 @@ VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
 
-# Sim-time sizing: small POOL/HASH/window so the Verilator build is fast.
-# Post-E.2: SYMBOL_FILTER_ID is no longer the input filter (sym_idx_lut is),
-# so the override is dropped; the package default 5754 (AAPL) is in the LUT
-# at sym_idx=0 and the smoke TB now drives stock_locate=5754.
+# Same sim-only sizing as Makefile.smoke.
 EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=64
 EXTRA_ARGS += -GPOOL_SLOTS=64 -GHASH_SLOTS=512
 

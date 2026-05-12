@@ -1,0 +1,14 @@
+TOPLEVEL := per_sym_state
+MODULE   := tb_per_sym_state
+SIM_BUILD := sim_build_per_sym_state
+
+# per_sym_state takes INITIAL_MIDPRICE as a parameter; lob_core_sym_pkg is
+# not included here (sibling-package unused-parameter warnings would trip
+# -Wall). The TB exercises the standalone module with the default zero
+# initialiser; integration coverage with the real INITIAL_MIDPRICE table
+# comes through the lob_core smoke/cycles TBs.
+VERILOG_SOURCES := \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/per_sym_state.sv)
+
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

@@ -15,6 +15,9 @@ SIM_BUILD := sim_build_lob_core_cycles
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_sym_pkg.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/sym_idx_lut.sv) \
+    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/per_sym_state.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
@@ -36,7 +39,10 @@ VERILOG_SOURCES := \
 #
 # These are sim-only Verilator overrides — the synthesis-time values come
 # from lob_core_params_pkg.sv (Phase B pinned).
-EXTRA_ARGS += -GSYMBOL_FILTER_ID=42 -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=128
+# Post-E.2: SYMBOL_FILTER_ID is no longer the input filter (sym_idx_lut is),
+# so the override is dropped; the package default 5754 (AAPL) is the
+# stock_locate the cycle TB drives.
+EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=128
 EXTRA_ARGS += -GPOOL_SLOTS=256 -GHASH_SLOTS=512
 
 include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

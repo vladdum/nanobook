@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// decoder_lob_top — cosim wrapper that wires itch_decoder.m_* directly to
-// lob_core.s_*. Both interfaces are AXI-S of book_event_t (256-bit tdata),
-// so the connection is one-to-one with no glue.
+// decoder_lob_top (M06 cosim) — wraps itch_decoder.m_* into lob_core.s_*,
+// both AXI-S of book_event_t (256-bit tdata). Mirrors the M05 cosim
+// wrapper but exposes the new M06 stat counters (rebases_total,
+// stale_drops, pool_leaks_freed, sym_lut_misses, epoch_wraps) so the TB
+// can assert on them.
 //
-// Used by dv/integration/m05_cosim/tb_cosim.py to bit-compare the RTL TOB
-// stream against sw/refbook (filtered to SYMBOL_FILTER_ID) on the M05 100K
-// slice (and, in Phase J, on the full-day captures).
+// dbg_epoch_bump is tied off to 0 — the cosim does not exercise the
+// epoch-wrap backdoor (only the unit TB tb_lob_core_rebase does).
 
 `include "book_event_pkg.sv"
 
@@ -31,12 +32,21 @@ module decoder_lob_top #(
     input  logic                    m_tready,
     output logic                    m_tlast,
 
-    // Selected stat counters from both stages (probed by the cosim TB).
+    // Decoder stats (selected)
     output logic [31:0]             events_emitted,
     output logic [31:0]             slow_path_dropped,
+
+    // M05 lob_core stats
     output logic [31:0]             events_in,
     output logic [31:0]             events_filtered,
-    output logic [31:0]             tob_deltas_out
+    output logic [31:0]             tob_deltas_out,
+
+    // M06 lob_core stats
+    output logic [31:0]             rebases_total,
+    output logic [31:0]             stale_drops,
+    output logic [31:0]             pool_leaks_freed,
+    output logic [31:0]             sym_lut_misses,
+    output logic [31:0]             epoch_wraps
 );
     // Inter-module book_event_t bus (256-bit AXI-S between decoder and core).
     logic [EV_DATA_W-1:0] ev_tdata;
@@ -44,8 +54,6 @@ module decoder_lob_top #(
     logic                 ev_tready;
     logic                 ev_tlast;
 
-    // Decoder stat outputs not surfaced to the TB — drained for Verilator
-    // unused-signal lint cleanliness.
     /* verilator lint_off UNUSEDSIGNAL */
     logic [31:0] dec_replace_split;
     logic [31:0] dec_mold_seq_gap;
@@ -56,12 +64,6 @@ module decoder_lob_top #(
     logic [31:0] lob_out_of_window;
     logic [31:0] lob_unknown_order;
     logic [31:0] lob_cancel_underflow;
-    // M06 ports — sunk for M05 cosim regression compat.
-    logic [31:0] lob_rebases_total;
-    logic [31:0] lob_stale_drops;
-    logic [31:0] lob_pool_leaks_freed;
-    logic [31:0] lob_sym_lut_misses;
-    logic [31:0] lob_epoch_wraps;
     /* verilator lint_on UNUSEDSIGNAL */
 
     itch_decoder #(
@@ -111,15 +113,12 @@ module decoder_lob_top #(
         .out_of_window    (lob_out_of_window),
         .unknown_order    (lob_unknown_order),
         .cancel_underflow (lob_cancel_underflow),
-        // M06 ports (added in F.2). The M05 cosim doesn't consume them
-        // — sink each output into a per-output wire under a lint waiver
-        // around the declarations; tie the dbg backdoor low.
         .dbg_epoch_bump   (1'b0),
-        .rebases_total    (lob_rebases_total),
-        .stale_drops      (lob_stale_drops),
-        .pool_leaks_freed (lob_pool_leaks_freed),
-        .sym_lut_misses   (lob_sym_lut_misses),
-        .epoch_wraps      (lob_epoch_wraps)
+        .rebases_total    (rebases_total),
+        .stale_drops      (stale_drops),
+        .pool_leaks_freed (pool_leaks_freed),
+        .sym_lut_misses   (sym_lut_misses),
+        .epoch_wraps      (epoch_wraps)
     );
 
 endmodule : decoder_lob_top

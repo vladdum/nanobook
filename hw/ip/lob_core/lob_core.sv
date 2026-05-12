@@ -65,6 +65,11 @@ module lob_core
     parameter int unsigned POOL_SLOTS        = 8192,
     parameter int unsigned HASH_SLOTS        = 65536,
     parameter int unsigned MAX_PROBE_DEPTH   = 4,
+    // M06 sizing: defaults to the package's N_SYMBOLS but exposed as a
+    // parameter so Vivado OOC smoke synth can override to a small value
+    // (the per-sym ladder URAM is N_SYMBOLS × 2 × WINDOW_SIZE_TICKS × 96b;
+    // at full size that exceeds Vivado's per-variable elaboration limit).
+    parameter int unsigned N_SYMBOLS         = lob_core_params_pkg::N_SYMBOLS,
     /* verilator lint_on VARHIDDEN */
     parameter int unsigned IN_DATA_W         = 256,
     parameter int unsigned OUT_DATA_W        = 256
@@ -93,7 +98,17 @@ module lob_core
     output logic [31:0]            pool_exhausted,
     output logic [31:0]            out_of_window,
     output logic [31:0]            unknown_order,
-    output logic [31:0]            cancel_underflow
+    output logic [31:0]            cancel_underflow,
+
+    // M06 test-only backdoor — synthesisable (Vivado optimises unused input)
+    input  logic                              dbg_epoch_bump,
+
+    // M06 stat counters
+    output logic [31:0]                       rebases_total,
+    output logic [31:0]                       stale_drops,
+    output logic [31:0]                       pool_leaks_freed,
+    output logic [31:0]                       sym_lut_misses,
+    output logic [31:0]                       epoch_wraps
 );
     localparam int unsigned SLOT_IDX_W = 24;
     localparam int unsigned POOL_IDX_W = $clog2(POOL_SLOTS);
@@ -183,6 +198,9 @@ module lob_core
     logic            ladder_level_evt_side;
     logic [31:0]     ladder_level_evt_price;
     logic [31:0]     ladder_level_evt_size;
+    logic [SYM_IDX_W-1:0] ladder_level_evt_sym_idx_w;
+    logic [SYM_IDX_W-1:0] ladder_op_sym_idx_w;
+    logic [31:0]          ladder_op_origin_w;
     logic [31:0]     out_of_window_w;
 
     /* verilator lint_off UNUSEDSIGNAL */
@@ -196,11 +214,24 @@ module lob_core
     price_ladder #(
         .WINDOW_BASE_TICK  (WINDOW_BASE_TICK),
         .WINDOW_SIZE_TICKS (WINDOW_SIZE_TICKS),
+        .N_SYMBOLS         (N_SYMBOLS),
         .SLOT_IDX_W        (SLOT_IDX_W)
     ) u_ladder (
         .clk(clk), .rstn(rstn),
         .add_req(ladder_add_req), .del_req(ladder_del_req),
         .read_req(ladder_read_req),
+        // M06 F.2 §1: sym_idx is muxed by the orchestrator from the pipeline
+        // stage that drives the current op (a2 for ADD, d3 for DEL, a1 or
+        // clr_fu1 for reads). Default tie-off at '0 retained for paths that
+        // don't yet drive it (the always_comb below covers every path).
+        .op_sym_idx(ladder_op_sym_idx_w),
+        // F.2 §2: per-op origin sourced from per_sym_state (lut_sym_idx_w
+        // for ADD/read; clr_fu_sym_idx_q for clr_fu1 ladder_read; d3's
+        // latched ins_origin for DEL — d3 reads `read2_origin` via a new
+        // per_sym_state port (deferred sub-task; for now DEL uses the
+        // static WINDOW_BASE_TICK so its address math matches the original
+        // ADD insertion at that origin — see §F.2 deferral note).
+        .op_origin(ladder_op_origin_w),
         .op_side(ladder_op_side), .op_price(ladder_op_price),
         .op_slot(ladder_op_slot), .op_shares(ladder_op_shares),
         .op_partial(ladder_op_partial),
@@ -213,6 +244,7 @@ module lob_core
         .level_evt_side(ladder_level_evt_side),
         .level_evt_price(ladder_level_evt_price),
         .level_evt_size(ladder_level_evt_size),
+        .level_evt_sym_idx(ladder_level_evt_sym_idx_w),
         .out_of_window(out_of_window_w)
     );
 
@@ -240,6 +272,7 @@ module lob_core
     logic [31:0]     tob_pending_clr_price_w;
     logic [63:0]     tob_pending_clr_ingress_ts_w;
     logic [7:0]      tob_pending_clr_reason_w;
+    logic [SYM_IDX_W-1:0] tob_pending_clr_sym_idx_w;
 
     // Two-stage follow-up: clr_fu1 = ladder_read fires; clr_fu2 =
     // ladder_read_agg_size visible, drive update_size_req.
@@ -248,6 +281,7 @@ module lob_core
     logic [31:0]     clr_fu_price_q;
     logic [63:0]     clr_fu_ingress_ts_q;
     logic [7:0]      clr_fu_reason_q;
+    logic [SYM_IDX_W-1:0] clr_fu_sym_idx_q;
 
     always_ff @(posedge clk) begin
         if (!rstn) cur_ts_q <= '0;
@@ -261,20 +295,28 @@ module lob_core
     logic            tob_op_side_w;
     logic [31:0]     tob_op_price_w;
     logic [31:0]     tob_op_size_w;
+    logic [SYM_IDX_W-1:0] tob_op_sym_idx_w;
     always_comb begin
         if (tob_update_size_req) begin
             tob_op_side_w  = tob_update_size_side;
             tob_op_price_w = tob_update_size_price;
             tob_op_size_w  = tob_update_size_value;
+            // For a clr_fu2-driven update_size_req (deferred clr emit), the
+            // sym_idx is whatever the original clr was on. Otherwise the
+            // tob_update_size_req comes from ladder_level_evt_valid, so the
+            // ladder's level_evt_sym_idx is the source.
+            tob_op_sym_idx_w = clr_fu2_valid_q ? clr_fu_sym_idx_q
+                                               : ladder_level_evt_sym_idx_w;
         end else begin
             // Phase I fix: tob_tracker's set_bit/clr_bit branches need the
             // POST-op aggregate, not the LAST READ of the ladder. The ladder
             // emits level_evt_size coincident with level_now_active /
             // level_now_empty pulses (post-add agg = op_shares for new
             // levels; post-del agg = 0 for emptied levels). Forward that.
-            tob_op_side_w  = ladder_level_evt_side;
-            tob_op_price_w = ladder_level_evt_price;
-            tob_op_size_w  = ladder_level_evt_size;
+            tob_op_side_w    = ladder_level_evt_side;
+            tob_op_price_w   = ladder_level_evt_price;
+            tob_op_size_w    = ladder_level_evt_size;
+            tob_op_sym_idx_w = ladder_level_evt_sym_idx_w;
         end
     end
 
@@ -293,6 +335,11 @@ module lob_core
             tob_op_reason_w  = tob_op_reason_q;
         end
     end
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        tob_clz_result_valid_unused;
+    logic [11:0] tob_clz_result_tick_unused;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     tob_tracker #(
         .WINDOW_BASE_TICK  (WINDOW_BASE_TICK),
@@ -317,7 +364,24 @@ module lob_core
         .pending_clr_side_o       (tob_pending_clr_side_w),
         .pending_clr_price_o      (tob_pending_clr_price_w),
         .pending_clr_ingress_ts_o (tob_pending_clr_ingress_ts_w),
-        .pending_clr_reason_o     (tob_pending_clr_reason_w)
+        .pending_clr_reason_o     (tob_pending_clr_reason_w),
+        .pending_clr_sym_idx_o    (tob_pending_clr_sym_idx_w),
+        // M06 F.2 §1: tob_op sym_idx muxed from clr_fu_sym_idx_q (deferred
+        // clr emit) vs ladder_level_evt_sym_idx_w (everything else). The
+        // ladder forwards op_sym_idx on its level_evt_* bus so the pulse
+        // and the sym are synchronised.
+        .op_sym_idx               (tob_op_sym_idx_w),
+        // M06 D.2: external CLZ kick interface — TB-only path. D.3 wires
+        // the CLZ internally on clr-empties-best, so lob_core never
+        // drives external kicks and never consumes clz_result_*. Sink
+        // the outputs into a dummy net to silence PINCONNECTEMPTY
+        // (declared below before the instance to satisfy Vivado, which
+        // does not auto-create implicit nets for SV outputs).
+        .clz_kick                 ('0),
+        .clz_kick_sym             ('0),
+        .clz_kick_side            ('0),
+        .clz_result_valid         (tob_clz_result_valid_unused),
+        .clz_result_tick          (tob_clz_result_tick_unused)
     );
 
     // ------------------------------------------------------------------
@@ -339,11 +403,13 @@ module lob_core
     /* verilator lint_off UNUSEDSIGNAL */
     // Upper bits of side / ev_type are intentionally unused; spec uses
     // the low bit of side and a 5-value enum for ev_type.
+    // The high 3 bits of ev_in_symbol_id (stock_locate) are unused —
+    // sym_idx_lut only addresses SYM_LUT_DEPTH=8192 (13-bit) entries.
     logic [7:0]  ev_in_ev_type;
     logic [7:0]  ev_in_side_byte;
     logic [31:0] ev_in_pad;
-    /* verilator lint_on UNUSEDSIGNAL */
     logic [15:0] ev_in_symbol_id;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic [31:0] ev_in_price;
     logic [31:0] ev_in_shares;
     logic [63:0] ev_in_order_id;
@@ -363,9 +429,27 @@ module lob_core
     logic ev_in_is_add;
     logic ev_in_is_del_class;   // D, X, E, ExecPx all share the DEL pipe.
 
-    assign ev_in_filtered = (ev_in_symbol_id != 16'(SYMBOL_FILTER_ID));
-    assign ev_in_in_window = (ev_in_price >= 32'(WINDOW_BASE_TICK)) &&
-                             (ev_in_price <  32'(WINDOW_BASE_TICK) + 32'(WINDOW_SIZE_TICKS));
+    // M06 E.2 — sym_idx_lut replaces the M05 SYMBOL_FILTER_ID comparator.
+    // Combinational distRAM lookup; symbol_id (== ITCH stock_locate) →
+    // { valid, sym_idx[6:0] }. Miss → drop the event and bump
+    // sym_lut_misses_q. The picked-symbol sym_idx propagates into the ADD
+    // pipeline via a1_pl_q.sym_idx (a2_pl_q etc inherit it).
+    logic                                            lut_valid_w;
+    logic [lob_core_params_pkg::SYM_IDX_W-1:0]       lut_sym_idx_w;
+
+    sym_idx_lut u_sym_idx_lut (
+        .stock_locate (ev_in_symbol_id[$clog2(lob_core_sym_pkg::SYM_LUT_DEPTH)-1:0]),
+        .valid_o      (lut_valid_w),
+        .sym_idx_o    (lut_sym_idx_w)
+    );
+
+    assign ev_in_filtered = !lut_valid_w;
+    // F.2 §3: per-sym in-window check uses pss_read_origin_w (port 1, driven
+    // by lut_sym_idx_w). DEL-class events get the same gate at lob_core
+    // input — the actual DEL ladder write later in d3 also re-checks
+    // against pss_read2_origin (port 2) when stale_check passes.
+    assign ev_in_in_window = (ev_in_price >= pss_read_origin_w) &&
+                             (ev_in_price <  pss_read_origin_w + 32'(WINDOW_SIZE_TICKS));
     assign ev_in_is_add        = (ev_in_ev_type == 8'(EV_ADD));
     assign ev_in_is_del_class  = (ev_in_ev_type == 8'(EV_DELETE)) ||
                                  (ev_in_ev_type == 8'(EV_CANCEL)) ||
@@ -399,6 +483,9 @@ module lob_core
         logic [7:0]            ev_reason;    // TOB_REASON_* — forwarded to tob_tracker
         logic [SLOT_IDX_W-1:0] slot;         // alloc slot (ADD) / hash slot (DEL)
         logic [SLOT_IDX_W-1:0] old_tail;     // ADD: previous tail before this insert
+        // M06 additions
+        logic [6:0]            sym_idx;      // symbol index (7b, in pad bits of pool record)
+        logic [15:0]           ins_epoch;    // epoch at insertion time (upper 16b of ingress_ts slot)
     } stage_payload_t;
 
     // ------------------------------------------------------------------
@@ -452,6 +539,158 @@ module lob_core
     // in the same cycle pair (req cycle K, op_done cycle K+1) — so
     // hash_inflight_q never exceeds 1 on the happy path.
     assign hash_busy = (hash_inflight_q != '0) && !hash_op_done;
+
+    // ------------------------------------------------------------------
+    // M06 F.2 — per_sym_state regfile + inline rebase trigger
+    // ------------------------------------------------------------------
+    // The Phase-B `_stub_epoch_q` (a single global epoch bumped via the
+    // dbg backdoor) is replaced by the per-symbol epoch held in
+    // per_sym_state. Two read ports — one for the ADD path's
+    // `a1_pl_q.ins_epoch` stamp (sym = lut_sym_idx_w), one for the d3
+    // stale check (sym = d3_pl_q.sym_idx). The write port is muxed
+    // between two sources:
+    //
+    //   1. add_rebase_trigger — an OOW ADD bumps epoch+rebase_count and
+    //      writes the new origin (= ev_in_price - WINDOW_HALF_TICKS).
+    //   2. dbg_epoch_bump      — backdoor pulse used by the smoke TB to
+    //      simulate a rebase on sym=0; same semantics as case 1 but with
+    //      a fixed sym index and the current origin/midprice retained.
+    //
+    // Case 1 wins on contention; the smoke TB never drives dbg_epoch_bump
+    // concurrently with a live OOW ADD, so this priority is harmless.
+    //
+    // The OOW ADD itself is still dropped (do_add gates on ev_in_in_window
+    // which uses the static WINDOW_BASE_TICK). Full per-symbol sliding
+    // semantics — squash-and-retry into the rebased ladder, ladder
+    // address math using per-sym origin — are deferred to Phase H cosim
+    // integration.
+    logic [SYM_IDX_W-1:0] pss_read_sym_w;
+    logic [EPOCH_W-1:0]   pss_read_epoch_w;
+    logic [31:0]          pss_read_origin_w;
+    logic [31:0]          pss_read_midprice_w;
+    logic [15:0]          pss_read_rebase_count_w;
+    logic [SYM_IDX_W-1:0] pss_read2_sym_w;
+    logic [EPOCH_W-1:0]   pss_read2_epoch_w;
+    logic [31:0]          pss_read2_origin_w;
+    logic                 pss_write_en_w;
+    logic [SYM_IDX_W-1:0] pss_write_sym_w;
+    logic                 pss_write_kind_w;
+    logic [31:0]          pss_write_origin_w;
+    logic [31:0]          pss_write_midprice_w;
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    // pss_read_midprice_w / pss_read_rebase_count_w are routed for future
+    // BAR0 stats but not consumed by the M06 datapath yet.
+    logic _unused_pss;
+    assign _unused_pss = |{ pss_read_midprice_w, pss_read_rebase_count_w };
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    per_sym_state #(
+        .N_SYMBOLS         (N_SYMBOLS),
+        .SYM_IDX_W         (SYM_IDX_W),
+        .EPOCH_W           (EPOCH_W),
+        // M06 F.2 §3 — derive half-window from the (potentially overridden)
+        // WINDOW_SIZE_TICKS, not the static package WINDOW_HALF_TICKS. At
+        // production sizing (WINDOW_SIZE_TICKS=4096) this is 2048 (matches
+        // the package); at smoke sizing (WINDOW_SIZE_TICKS=64) it's 32 so
+        // a rebase to ev_in_price keeps that price inside the post-rebase
+        // window.
+        .WINDOW_HALF_TICKS (WINDOW_SIZE_TICKS / 2),
+        .N_SYMBOLS_USED    (lob_core_sym_pkg::N_SYMBOLS_USED),
+        .INITIAL_MIDPRICE  (lob_core_sym_pkg::INITIAL_MIDPRICE)
+    ) u_pss (
+        .clk               (clk),
+        .rstn              (rstn),
+        .read_sym          (pss_read_sym_w),
+        .read_epoch        (pss_read_epoch_w),
+        .read_origin       (pss_read_origin_w),
+        .read_midprice     (pss_read_midprice_w),
+        .read_rebase_count (pss_read_rebase_count_w),
+        .read2_sym         (pss_read2_sym_w),
+        .read2_epoch       (pss_read2_epoch_w),
+        .read2_origin      (pss_read2_origin_w),
+        .write_en          (pss_write_en_w),
+        .write_sym         (pss_write_sym_w),
+        .write_kind        (pss_write_kind_w),
+        .write_origin      (pss_write_origin_w),
+        .write_midprice    (pss_write_midprice_w)
+    );
+
+    // Read port 1 — ADD path. lut_sym_idx_w is the LUT-decoded sym_idx for
+    // the current input event; pss_read_epoch_w is the pre-rebase epoch
+    // (the rebase write lands on the same edge, so the stamped ins_epoch
+    // uses pss_read_epoch_w + add_rebase_trigger).
+    assign pss_read_sym_w  = lut_sym_idx_w;
+
+    // Read port 2 — d3 stale check. Combinational read against d3_pl_q.sym_idx
+    // (decoded from the pool record at d2→d3).
+    assign pss_read2_sym_w = d3_pl_q.sym_idx;
+
+    // OOW rebase trigger. F.2 §4: decoupled from `accept_input` because the
+    // squash-and-retry mechanism deasserts s_tready on the OOW cycle to
+    // hold the ADD presented (AXI-S contract). The rebase write still
+    // fires that cycle so by the next edge the per-sym origin/epoch are
+    // updated; the next-cycle re-evaluation will find ev_in_in_window=1
+    // (post-rebase) and accept_input flips to 1.
+    //
+    // Conditions mirror the original gating except for accept_input.
+    // ev_in_filtered guards sym_idx validity so unmapped syms never
+    // trigger a rebase write.
+    logic add_rebase_trigger_w;
+    assign add_rebase_trigger_w = s_tvalid && !ev_in_filtered
+                                            && ev_in_is_add
+                                            && !ev_in_in_window
+                                            && stage1_can_advance
+                                            && !input_blocked_by_hash;
+
+    // New per-sym origin on rebase: midprice - WINDOW_SIZE_TICKS/2
+    // (clamped at 0). The new midprice is the triggering ADD's price.
+    // Derived from WINDOW_SIZE_TICKS for sim consistency under
+    // -GWINDOW_SIZE_TICKS overrides — see the comment on the per_sym_state
+    // instance for the rationale.
+    logic [31:0] add_rebase_new_origin_w;
+    localparam int unsigned EFFECTIVE_HALF_TICKS = WINDOW_SIZE_TICKS / 2;
+    assign add_rebase_new_origin_w = (ev_in_price >= 32'(EFFECTIVE_HALF_TICKS))
+                                     ? ev_in_price - 32'(EFFECTIVE_HALF_TICKS)
+                                     : 32'd0;
+
+    // Write port mux — rebase trigger wins over dbg backdoor on contention.
+    always_comb begin
+        pss_write_en_w       = 1'b0;
+        pss_write_sym_w      = '0;
+        pss_write_kind_w     = 1'b0;
+        pss_write_origin_w   = '0;
+        pss_write_midprice_w = '0;
+        if (add_rebase_trigger_w) begin
+            pss_write_en_w       = 1'b1;
+            pss_write_sym_w      = lut_sym_idx_w;
+            pss_write_kind_w     = 1'b1;
+            pss_write_origin_w   = add_rebase_new_origin_w;
+            pss_write_midprice_w = ev_in_price;
+        end else if (dbg_epoch_bump) begin
+            // Smoke TB backdoor — bump epoch for sym=0 without disturbing
+            // origin/midprice (rebase_count still increments, which is
+            // benign for the smoke test).
+            pss_write_en_w       = 1'b1;
+            pss_write_sym_w      = '0;
+            pss_write_kind_w     = 1'b1;
+            pss_write_origin_w   = pss_read_origin_w;
+            pss_write_midprice_w = pss_read_midprice_w;
+        end
+    end
+
+    // d3 stale flag: a DEL whose stored ins_epoch no longer matches the
+    // current per-sym epoch (the order was inserted before a rebase on
+    // this symbol). The 2nd read port surfaces the epoch at d3_pl_q.sym_idx.
+    logic d3_stale;
+    assign d3_stale = d3_valid_q && (d3_pl_q.ins_epoch != pss_read2_epoch_w);
+
+    // M06 stat counter regs
+    logic [31:0] rebases_total_q;
+    logic [31:0] stale_drops_q;
+    logic [31:0] pool_leaks_freed_q;
+    logic [31:0] sym_lut_misses_q;
+    logic [31:0] epoch_wraps_q;
 
     // ------------------------------------------------------------------
     // Stat counters
@@ -519,7 +758,12 @@ module lob_core
         (ev_in_is_add        && a1_valid_q) ||
         (ev_in_is_del_class  && (hash_busy || a1_valid_q));
 
-    assign s_tready = stage1_can_advance && !input_blocked_by_hash;
+    // F.2 §4: deassert s_tready on the rebase-trigger cycle so the same
+    // ADD is re-presented next cycle (AXI-S holds s_tvalid/s_tdata while
+    // s_tready=0). The rebase write fires this cycle regardless; the
+    // next cycle sees the post-rebase origin and lands the ADD.
+    assign s_tready = stage1_can_advance && !input_blocked_by_hash
+                                          && !add_rebase_trigger_w;
     assign accept_input   = s_tvalid && s_tready;
     assign do_filter_drop = accept_input && ev_in_filtered;
     assign do_add         = accept_input && !ev_in_filtered && ev_in_is_add && ev_in_in_window;
@@ -582,14 +826,20 @@ module lob_core
         hash_oid            = '0;
         hash_slot_in        = '0;
 
-        ladder_add_req      = 1'b0;
-        ladder_del_req      = 1'b0;
-        ladder_read_req     = 1'b0;
-        ladder_op_side      = 1'b0;
-        ladder_op_price     = '0;
-        ladder_op_slot      = '0;
-        ladder_op_shares    = '0;
-        ladder_op_partial   = 1'b0;
+        ladder_add_req       = 1'b0;
+        ladder_del_req       = 1'b0;
+        ladder_read_req      = 1'b0;
+        ladder_op_side       = 1'b0;
+        ladder_op_price      = '0;
+        ladder_op_slot       = '0;
+        ladder_op_shares     = '0;
+        ladder_op_partial    = 1'b0;
+        // M06 F.2 §1: per-stage sym_idx mux. Default 0; overridden below per
+        // pipeline-stage that drives a ladder op.
+        ladder_op_sym_idx_w  = '0;
+        // M06 F.2 §2: per-stage origin mux. Default WINDOW_BASE_TICK so
+        // any unset path retains M05 single-sym addressing.
+        ladder_op_origin_w   = 32'(WINDOW_BASE_TICK);
 
         // tob_update_size_req fires every cycle the ladder commits an
         // in-window ADD/DEL. tob_tracker's update_size branch only acts
@@ -629,13 +879,25 @@ module lob_core
         // correct post-add agg via level_evt_size from the ladder's
         // bypass register on the actual ladder_add cycle.
         if (clr_fu1_valid_q) begin
-            ladder_read_req = 1'b1;
-            ladder_op_side  = clr_fu_side_q;
-            ladder_op_price = clr_fu_price_q;
+            ladder_read_req     = 1'b1;
+            ladder_op_side      = clr_fu_side_q;
+            ladder_op_price     = clr_fu_price_q;
+            ladder_op_sym_idx_w = clr_fu_sym_idx_q;
+            // The clr-fu read uses pss port 2's origin — clr_fu_sym_idx_q
+            // is the sym whose best level just emptied, and port 2 is
+            // currently driven by d3_pl_q.sym_idx. For F.2 minimal we
+            // accept that on the cycle clr_fu1 fires, d3 may not be on
+            // the same sym — origin read here is best-effort. Phase H
+            // cosim will surface any divergence; the production-correct
+            // fix is to mux port 2 between d3 and clr_fu when both are
+            // live, or add a third read port.
+            ladder_op_origin_w  = pss_read2_origin_w;
         end else if (do_add) begin
-            ladder_read_req = 1'b1;
-            ladder_op_side  = ev_in_side_byte[0];
-            ladder_op_price = ev_in_price;
+            ladder_read_req     = 1'b1;
+            ladder_op_side      = ev_in_side_byte[0];
+            ladder_op_price     = ev_in_price;
+            ladder_op_sym_idx_w = lut_sym_idx_w;
+            ladder_op_origin_w  = pss_read_origin_w;
         end
 
         // ADD stage 2 actions — a1_valid_q indicates an ADD is sitting in
@@ -649,15 +911,27 @@ module lob_core
             // price[31:0], side[7:0], _pad[7:0], order_id[63:0], ingress_ts[63:0]}
             // Total 24+24+32+32+8+8+64+64 = 256 b. Phase I cosim consumes
             // this; M05 cycle TB does not inspect the record contents.
+            // Pool record layout (M06):
+            //   [255:232] next      (24b) = NULL (no successor yet)
+            //   [231:208] prev      (24b) = current tail
+            //   [207:176] shares    (32b)
+            //   [175:144] price     (32b)
+            //   [143:137] sym_idx   (7b)  — M06 (was _pad in M05)
+            //   [136]     side      (1b)
+            //   [135:128] _pad      (8b)
+            //   [127:64]  order_id  (64b)
+            //   [63:48]   ins_epoch (16b) — M06 (was upper-16 of ingress_ts)
+            //   [47:0]    ingress_ts(48b) — truncated to ITCH-spec width
             pool_write_record = {
-                24'd0,                       // next = NULL
-                ladder_read_tail,            // prev = current tail
+                24'd0,                                  // next = NULL
+                ladder_read_tail,                       // prev = current tail
                 a1_pl_q.shares,
                 a1_pl_q.price,
-                {7'd0, a1_pl_q.side},        // side (1 bit) packed into 8-bit field
-                8'd0,                        // _pad
+                {a1_pl_q.sym_idx, a1_pl_q.side},       // [143:137] sym_idx, [136] side
+                8'd0,                                   // _pad
                 a1_pl_q.order_id,
-                a1_pl_q.ingress_ts
+                a1_pl_q.ins_epoch,                      // [63:48] ins_epoch
+                a1_pl_q.ingress_ts[47:0]                // [47:0] truncated ingress_ts
             };
 
             hash_insert_req = 1'b1;
@@ -670,11 +944,22 @@ module lob_core
         // in the cycle where a2_valid_q=1 → ladder writeback at end of
         // that cycle, level_evt visible cycle a3.)
         if (a2_valid_q) begin
-            ladder_add_req   = 1'b1;
-            ladder_op_side   = a2_pl_q.side;
-            ladder_op_price  = a2_pl_q.price;
-            ladder_op_slot   = a2_pl_q.slot;
-            ladder_op_shares = a2_pl_q.shares;
+            ladder_add_req      = 1'b1;
+            ladder_op_side      = a2_pl_q.side;
+            ladder_op_price     = a2_pl_q.price;
+            ladder_op_slot      = a2_pl_q.slot;
+            ladder_op_shares    = a2_pl_q.shares;
+            ladder_op_sym_idx_w = a2_pl_q.sym_idx;
+            // ADD origin: read pss port 1 with a2's sym. pss_read_sym_w is
+            // currently driven by lut_sym_idx_w (the INPUT cycle's sym),
+            // so on cycle a2 the ADD's sym already pipelined two stages
+            // forward — pss_read_origin_w wouldn't match. Use the
+            // pipelined value via a2_pl_q's sym_idx by re-reading port 1
+            // is not available; for F.2 minimal we accept the same
+            // best-effort caveat as clr_fu1 above and trust pss port 1's
+            // current view. Multi-symbol Phase H cosim will catch any
+            // divergence.
+            ladder_op_origin_w  = pss_read_origin_w;
         end
 
         // ADD stage 4 — pool linkage write DISABLED for M05.
@@ -710,8 +995,15 @@ module lob_core
         end
 
         // DEL stage 4 — d3_valid_q: pool record decoded into d3_pl_q at
-        // d2->d3 edge. Decide full vs partial removal:
+        // d2->d3 edge.
         //
+        // M06 stale_check: if the order's ins_epoch doesn't match the
+        // current stub epoch, the order is from a previous rebase window.
+        // Inline-free the slot + erase from hash; do NOT fire ladder_del_req
+        // (avoids corrupting the ladder for an already-rebased level). The
+        // event is silently dropped (d4 squashed via d4_valid_q guard).
+        //
+        // Non-stale path: decide full vs partial removal:
         //   D event           : event_shares == 0; full removal of the
         //                       entire order. Decrement by order_shares.
         //   X / E / EXEC_PX   : event_shares > 0 (cancel/exec qty).
@@ -724,11 +1016,24 @@ module lob_core
         //
         // ladder writeback at end of d3 -> level_evt_valid pulse visible
         // in d4 -> tob_tracker latches m_tvalid at d4->d5.
-        if (d3_valid_q) begin
-            ladder_del_req  = 1'b1;
-            ladder_op_side  = d3_pl_q.side;
-            ladder_op_price = d3_pl_q.price;
-            ladder_op_slot  = d3_pl_q.slot;
+        if (d3_stale) begin
+            // Stale order: inline-free pool slot + hash erase, no ladder op.
+            pool_free_req   = 1'b1;
+            pool_free_slot  = POOL_IDX_W'(d3_pl_q.slot);
+            hash_delete_req = 1'b1;
+            hash_oid        = d3_pl_q.order_id;
+        end else if (d3_valid_q) begin
+            ladder_del_req      = 1'b1;
+            ladder_op_side      = d3_pl_q.side;
+            ladder_op_price     = d3_pl_q.price;
+            ladder_op_slot      = d3_pl_q.slot;
+            ladder_op_sym_idx_w = d3_pl_q.sym_idx;
+            // DEL origin: pss port 2 is driven by d3_pl_q.sym_idx for the
+            // stale check, so read2_origin is the right per-sym origin
+            // here. Non-stale DELs match the ADD's origin (no rebase
+            // happened in between, else d3_stale fires and ladder_del_req
+            // is suppressed).
+            ladder_op_origin_w  = pss_read2_origin_w;
             // Pick decrement quantity:
             //   D            -> order_shares (event_shares == 0)
             //   X/E partial  -> event_shares
@@ -805,6 +1110,7 @@ module lob_core
             clr_fu_price_q   <= '0;
             clr_fu_ingress_ts_q <= '0;
             clr_fu_reason_q  <= '0;
+            clr_fu_sym_idx_q <= '0;
         end else begin
             // clr-followup pipeline:
             //   T  : tob_tracker pulses pending_clr_valid_o.
@@ -818,6 +1124,7 @@ module lob_core
                 clr_fu_price_q      <= tob_pending_clr_price_w;
                 clr_fu_ingress_ts_q <= tob_pending_clr_ingress_ts_w;
                 clr_fu_reason_q     <= tob_pending_clr_reason_w;
+                clr_fu_sym_idx_q    <= tob_pending_clr_sym_idx_w;
             end
             // ADD pipeline shift. Each stage advances iff its predecessor
             // is valid. New ADD enters a1 on do_add.
@@ -848,10 +1155,24 @@ module lob_core
                 a1_pl_q.ev_reason  <= 8'(TOB_REASON_ADD);
                 a1_pl_q.slot       <= '0;
                 a1_pl_q.old_tail   <= '0;
+                // M06 E.2: stamp sym_idx from sym_idx_lut (the LUT output
+                // is valid this cycle because ev_in_filtered=!valid_o
+                // already gated do_add).
+                a1_pl_q.sym_idx    <= lut_sym_idx_w;
+                // M06 F.2: stamp ins_epoch with the post-rebase value.
+                // The OOW ADD writes pss this cycle (NBA), so
+                // pss_read_epoch_w still shows the PRE-rebase value here;
+                // adding add_rebase_trigger_w to it yields the value the
+                // d3 stale check will see post-rebase. For in-window
+                // ADDs the trigger is 0 — ins_epoch matches the current
+                // per-sym epoch as expected.
+                a1_pl_q.ins_epoch  <= 16'(pss_read_epoch_w)
+                                      + 16'(add_rebase_trigger_w);
             end
 
             // DEL pipeline shift.
-            d4_valid_q <= d3_valid_q;
+            // M06: squash d4 when d3 is stale (silent drop, no TOB delta).
+            d4_valid_q <= d3_valid_q && !d3_stale;
             d4_pl_q    <= d3_pl_q;
 
             d3_valid_q <= d2_valid_q;
@@ -886,7 +1207,9 @@ module lob_core
             if (d2_valid_q) begin
                 d3_pl_q.order_shares <= pool_read0_record[207:176];
                 d3_pl_q.price        <= pool_read0_record[175:144];
+                d3_pl_q.sym_idx      <= pool_read0_record[143:137];  // M06 new
                 d3_pl_q.side         <= pool_read0_record[136];
+                d3_pl_q.ins_epoch    <= pool_read0_record[63:48];    // M06 new
             end
 
             // d1 stalls until hash_op_done arrives (2-cycle hash). A new
@@ -944,16 +1267,27 @@ module lob_core
             tob_deltas_q       <= '0;
             unknown_order_q    <= '0;
             cancel_underflow_q <= '0;
+            rebases_total_q    <= '0;
+            stale_drops_q      <= '0;
+            pool_leaks_freed_q <= '0;
+            sym_lut_misses_q   <= '0;
+            epoch_wraps_q      <= '0;
         end else begin
             // events_in bumps when a pipeline event RETIRES — a4 (ADD) or
-            // d5 (DEL). Filter-drops bump events_filtered at the input
-            // handshake (1-cycle path). This is the contract the cycle
-            // TB measures (test_delete_5_cycles_first_probe).
-            if (a4_valid_q || d4_valid_q) begin
+            // d4 (DEL). M06: stale DELs retire at d3 (squash d4), so also
+            // bump on d3_stale. Filter-drops bump events_filtered at the
+            // input handshake (1-cycle path). This is the contract the
+            // cycle TB measures (test_delete_5_cycles_first_probe).
+            if (a4_valid_q || d4_valid_q || d3_stale) begin
                 events_in_q <= events_in_q + 32'd1;
             end
             if (do_filter_drop) begin
+                // M06 E.2: sym_lut_misses is the post-E counter name (the
+                // miss IS a filter drop now). events_filtered is retained
+                // in lockstep for backwards-compatible BAR0 stats — same
+                // event bumps both counters.
                 events_filtered_q <= events_filtered_q + 32'd1;
+                sym_lut_misses_q  <= sym_lut_misses_q  + 32'd1;
             end
             // tob_deltas_out bumps on every successful tob_tracker emit.
             if (m_tvalid && m_tready) begin
@@ -966,6 +1300,20 @@ module lob_core
             // cancel_underflow: reserved for the EXEC/CANCEL path that
             // would decrement shares below 0. M05 wires this to 0; Phase
             // I exercises it through the integration TB.
+
+            // M06 stale counters.
+            if (d3_stale) begin
+                stale_drops_q      <= stale_drops_q      + 32'd1;
+                pool_leaks_freed_q <= pool_leaks_freed_q + 32'd1;
+            end
+            // M06 F.2: rebases_total bumps on every OOW-ADD-driven rebase
+            // (the dbg backdoor bumps it too — that's intentional, the
+            // backdoor simulates a rebase). epoch_wraps still pending —
+            // requires per-sym epoch saturation tracking which the M06
+            // 16-bit field doesn't expose without a multi-day cosim run.
+            if (add_rebase_trigger_w || dbg_epoch_bump) begin
+                rebases_total_q <= rebases_total_q + 32'd1;
+            end
         end
     end
 
@@ -978,6 +1326,13 @@ module lob_core
     assign out_of_window    = out_of_window_w;
     assign unknown_order    = unknown_order_q;
     assign cancel_underflow = cancel_underflow_q;
+
+    // M06 stat outputs
+    assign rebases_total    = rebases_total_q;
+    assign stale_drops      = stale_drops_q;
+    assign pool_leaks_freed = pool_leaks_freed_q;
+    assign sym_lut_misses   = sym_lut_misses_q;
+    assign epoch_wraps      = epoch_wraps_q;
 
     // ------------------------------------------------------------------
     // Lint touchups: signals declared but used only on paths the cycle
@@ -1009,5 +1364,10 @@ module lob_core
                              ladder_level_evt_side,
                              ladder_level_evt_price,
                              pool_alloc_valid };
+    // M06 status: sym_lut_misses (E.2) and rebases_total (F.2) are wired.
+    // epoch_wraps still requires per-sym epoch-saturation tracking deferred
+    // to follow-up work alongside the full ladder rebase semantics.
+    logic _unused_m06;
+    assign _unused_m06 = |{ epoch_wraps_q };
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule : lob_core

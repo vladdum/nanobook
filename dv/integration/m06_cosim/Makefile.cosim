@@ -1,0 +1,61 @@
+# M06 integration cosim — drive a multi-symbol ITCH slice through
+# itch_decoder + lob_core and bit-compare against sw/refbook filtered to
+# the picked-100 stock_locate set (read from lob_core_sym_init.mem).
+#
+# Required env vars (set by run_slice.sh / run_full_day.sh):
+#   M06_SLICE_ITCH    Path to the multi-symbol slice (.zst / .gz / raw).
+# Optional:
+#   M06_MAX_MSGS      Cap input messages (debug).
+#   M06_DRAIN_CYCLES  Cycles to wait after drive completes (default 2048).
+#   V_THREADS         Verilator thread count (default 4).
+
+REPO_ROOT := $(shell git rev-parse --show-toplevel)
+
+TOPLEVEL_LANG := verilog
+TOPLEVEL := decoder_lob_top
+MODULE   := tb_cosim
+
+# Source order: packages first, then sub-modules, then top-level wrappers,
+# then the cosim wrapper.
+ITCH_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
+                $(filter-out %/book_event_pkg.sv %/itch_decoder.sv, \
+                    $(wildcard $(REPO_ROOT)/hw/ip/itch_decoder/*.sv)) \
+                $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
+
+# lob_core M06: params pkg + sym pkg are package-only; sym_idx_lut and
+# per_sym_state are new M06 sub-modules instantiated by lob_core.sv.
+LOB_SOURCES := $(REPO_ROOT)/hw/ip/lob_core/lob_core_params_pkg.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/lob_core_sym_pkg.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/sym_idx_lut.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/per_sym_state.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/order_pool.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/order_id_hash.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/price_ladder.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/tob_tracker.sv \
+               $(REPO_ROOT)/hw/ip/lob_core/lob_core.sv
+
+VERILOG_SOURCES := $(ITCH_SOURCES) $(LOB_SOURCES) \
+                   $(REPO_ROOT)/dv/integration/m06_cosim/decoder_lob_top.sv
+
+VERILATOR_FLAGS := -Wall -Wno-DECLFILENAME -Wno-fatal -Wno-UNUSEDSIGNAL \
+                   -I$(REPO_ROOT)/hw/ip/itch_decoder \
+                   -I$(REPO_ROOT)/hw/ip/lob_core
+
+V_THREADS ?= 4
+ifneq ($(V_THREADS),1)
+VERILATOR_FLAGS += --threads $(V_THREADS)
+endif
+EXTRA_ARGS := $(VERILATOR_FLAGS)
+
+SIM := verilator
+SIM_BUILD := sim_build_m06_cosim
+
+# Python module search path:
+#   - this dir            (cocotb resolves MODULE := tb_cosim)
+#   - REPO_ROOT           (sw.replay, sw.refbook imports)
+#   - dv/unit/lob_core    (_book.unpack_tob_delta)
+#   - dv/unit/itch_decoder (_axis.drive_beats)
+#   - sw/refbook/build    (refbook pybind .so)
+export PYTHONPATH := $(REPO_ROOT)/dv/integration/m06_cosim:$(REPO_ROOT):$(REPO_ROOT)/dv/unit/lob_core:$(REPO_ROOT)/dv/unit/itch_decoder:$(REPO_ROOT)/sw/refbook/build
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
