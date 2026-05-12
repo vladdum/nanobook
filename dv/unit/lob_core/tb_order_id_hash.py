@@ -39,8 +39,10 @@ async def _insert(dut, oid: int, slot: int) -> bool:
     dut.insert_req.value = 1
     dut.order_id.value = oid
     dut.slot_idx_in.value = slot
-    # Wait for op_done — variable-cycle (probe loop).
-    for _ in range(MAX_PROBE + 4):
+    # Wait for op_done — variable-cycle (probe loop). Post 2026-05-13
+    # amendment: first probe is 3 cycles, each subsequent probe is 2
+    # cycles (registered URAM payload read).
+    for _ in range(3 + 2 * MAX_PROBE + 4):
         await RisingEdge(dut.clk)
         if int(dut.op_done.value):
             ok = bool(int(dut.op_ok.value))
@@ -52,7 +54,7 @@ async def _insert(dut, oid: int, slot: int) -> bool:
 async def _lookup(dut, oid: int) -> tuple[bool, int]:
     dut.lookup_req.value = 1
     dut.order_id.value = oid
-    for _ in range(MAX_PROBE + 4):
+    for _ in range(3 + 2 * MAX_PROBE + 4):
         await RisingEdge(dut.clk)
         if int(dut.op_done.value):
             found = bool(int(dut.op_ok.value))
@@ -65,7 +67,7 @@ async def _lookup(dut, oid: int) -> tuple[bool, int]:
 async def _delete(dut, oid: int) -> bool:
     dut.delete_req.value = 1
     dut.order_id.value = oid
-    for _ in range(MAX_PROBE + 4):
+    for _ in range(3 + 2 * MAX_PROBE + 4):
         await RisingEdge(dut.clk)
         if int(dut.op_done.value):
             ok = bool(int(dut.op_ok.value))
@@ -102,12 +104,14 @@ async def test_delete_then_lookup_returns_invalid(dut):
 
 
 @cocotb.test()
-async def test_first_probe_two_cycle_latency(dut):
-    """Single lookup on empty table: op_done asserts 2 cycles after req.
+async def test_first_probe_three_cycle_latency(dut):
+    """Single lookup on empty table: op_done asserts 3 cycles after req.
 
-    Spec §3.6 (2026-05-11 amendment): registered URAM read pushes
-    first-probe latency from 1 -> 2 cycles. A regression to combinational
-    read would assert op_done at cycle 1.
+    Spec §3.6 (2026-05-13 amendment): the second stage of the URAM read
+    (the payload, on top of the 2026-05-11 bucket-index register) adds a
+    third cycle to the hash op. Pipeline: ST_IDLE -> ST_FIRST_READ ->
+    ST_FIRST. A regression that collapses ST_FIRST_READ would assert
+    op_done at cycle 2.
     """
     cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
     await _reset(dut)
@@ -115,23 +119,28 @@ async def test_first_probe_two_cycle_latency(dut):
     dut.order_id.value = 0xDEADBEEF
     await RisingEdge(dut.clk)
     dut.lookup_req.value = 0
-    # Cycle 1 after req: op_done MUST still be 0 (URAM read in flight).
+    # Cycle 1 after req: ST_FIRST_READ; op_done MUST be 0.
     await RisingEdge(dut.clk)
     assert int(dut.op_done.value) == 0, (
         "op_done fired at cycle 1; registered URAM read regression"
     )
-    # Cycle 2 after req: op_done MUST be 1 (read complete, op_ok=0 because miss).
+    # Cycle 2 after req: ST_FIRST_READ -> ST_FIRST transition; op_done still 0
+    # because ST_FIRST runs on the NEXT cycle once row_first_q has settled.
     await RisingEdge(dut.clk)
-    assert int(dut.op_done.value) == 1, "op_done failed to fire at cycle 2"
+    assert int(dut.op_done.value) == 0, "op_done fired at cycle 2"
+    # Cycle 3 after req: ST_FIRST decides on row_first_q (empty bucket).
+    await RisingEdge(dut.clk)
+    assert int(dut.op_done.value) == 1, "op_done failed to fire at cycle 3"
     assert int(dut.op_ok.value) == 0, "op_ok should be 0 for empty-table miss"
 
 
 @cocotb.test()
 async def test_lookup_different_bucket_after_insert(dut):
     """After inserting oid A, a lookup of oid B (different hash bucket)
-    must report miss in EXACTLY 2 cycles via ST_FIRST — must NOT fall
+    must report miss in EXACTLY 3 cycles via ST_FIRST — must NOT fall
     through to ST_PROBE. Regression on the row_first_probe_q stale-read
-    bug from commit 481f294."""
+    bug from commit 481f294 (now restated for the 2026-05-13 amendment:
+    row_first_q is registered in a dedicated ST_FIRST_READ state)."""
     cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
     await _reset(dut)
     # Insert oid A (let the existing _insert helper handle the wait).
@@ -142,14 +151,16 @@ async def test_lookup_different_bucket_after_insert(dut):
     dut.order_id.value = 0x0000_0000_0000_0001
     await RisingEdge(dut.clk)
     dut.lookup_req.value = 0
-    # Cycle 1 after req: still in ST_FIRST setup; op_done must be 0.
+    # Cycles 1 and 2 after req: ST_FIRST_READ / pre-decide; op_done must be 0.
     await RisingEdge(dut.clk)
     assert int(dut.op_done.value) == 0, "op_done fired at cycle 1"
-    # Cycle 2 after req: ST_FIRST decides on table_ram[hash(B)] (empty).
+    await RisingEdge(dut.clk)
+    assert int(dut.op_done.value) == 0, "op_done fired at cycle 2"
+    # Cycle 3 after req: ST_FIRST decides on row_first_q for bucket(B).
     # op_done=1, op_ok=0. probe_max stays at 1 (NOT 2) — proves no probe
     # fallthrough happened.
     await RisingEdge(dut.clk)
-    assert int(dut.op_done.value) == 1, "op_done failed at cycle 2"
+    assert int(dut.op_done.value) == 1, "op_done failed at cycle 3"
     assert int(dut.op_ok.value) == 0, "op_ok should be 0 (miss)"
     # Drain one extra cycle, then read probe_max.
     await RisingEdge(dut.clk)
@@ -183,6 +194,64 @@ async def test_probe_depth_saturates(dut):
     assert inserts_ok == MAX_PROBE, f"expected {MAX_PROBE} OK inserts, got {inserts_ok}"
     assert int(dut.hash_overflow.value) >= len(chosen) - MAX_PROBE
     assert int(dut.hash_probe_max.value) == MAX_PROBE
+
+
+@cocotb.test()
+async def test_insert_then_delete_same_oid_single_cycle_pulse(dut):
+    """Regression: the orchestrator pulses hash_*_req high for ONE cycle
+    only. If an ADD on oid X completes at cycle K, a DEL on the same X
+    fired at cycle K+1 must be sampled — even though the held-req guard
+    sees last_done_q=1 && order_id==last_oid_q.
+
+    Pre-fix, the guard ignored the new req because it only matched on
+    oid, not op-type. The orchestrator's single-cycle pulse meant the
+    req was lost forever, and the inflight counter incremented anyway —
+    hash_busy latched high, deadlocking lob_core's s_tready. This bit
+    NASDAQ ITCH cosim where Add+immediate-Cancel-on-same-oid is routine.
+
+    Pattern matches the orchestrator exactly: insert_req pulses high for
+    one clock, then immediately delete_req pulses high for one clock
+    with the same oid. Asserts that the delete completes (op_done +
+    op_ok) within the 3-cycle hash budget.
+    """
+    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    await _reset(dut)
+    OID = 0xABCD_1234_5678_9ABC
+
+    # 1-cycle insert pulse, wait for op_done.
+    dut.insert_req.value = 1
+    dut.order_id.value = OID
+    dut.slot_idx_in.value = 0x42
+    await RisingEdge(dut.clk)
+    dut.insert_req.value = 0
+    # Wait until op_done fires (3 cycles for first-probe hit).
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        if int(dut.op_done.value):
+            break
+    else:
+        raise TimeoutError("insert never completed")
+    assert int(dut.op_ok.value), "insert should succeed on empty table"
+
+    # Single-cycle DEL pulse on the SAME oid, IMMEDIATELY after op_done.
+    # No deassertion gap — this is the exact orchestrator pattern that
+    # the pre-fix held-req guard mis-handled.
+    dut.delete_req.value = 1
+    dut.order_id.value = OID
+    await RisingEdge(dut.clk)
+    dut.delete_req.value = 0
+    # The delete must complete within the 3-cycle hash budget. Pre-fix
+    # this would hang forever (FSM ignored the req, op_done never fires).
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        if int(dut.op_done.value):
+            break
+    else:
+        raise TimeoutError(
+            "delete-after-insert on same oid never completed — held-req "
+            "guard regression (FSM ignored a different-op-type pulse)"
+        )
+    assert int(dut.op_ok.value), "delete should hit the just-inserted oid"
 
 
 def _emulate_hash(oid: int) -> int:

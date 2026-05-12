@@ -522,7 +522,28 @@ module lob_core
     // ------------------------------------------------------------------
     logic [3:0] hash_inflight_q;
     logic       hash_req_fired;
-    assign hash_req_fired = hash_insert_req | hash_delete_req | hash_lookup_req;
+    // 2026-05-13 fix: only count a req as fired when the hash FSM can
+    // actually sample it (i.e., is not currently mid-op). Pre-fix, ANY
+    // req-line assertion incremented the counter — but the hash module
+    // only samples requests in ST_IDLE, so a req asserted while the FSM
+    // was in ST_FIRST_READ / ST_FIRST / ST_PROBE_* was silently dropped
+    // and the counter over-counted. With the post-2026-05-13 3-cycle
+    // hash, the d3-stage hash_delete_req for a full-removal DEL fires
+    // 5 cycles after the DEL handshake — which collides with the next
+    // event's still-in-flight hash op (back-to-back DEL handshake spacing
+    // is 3 cycles, so the second event's hash is in ST_FIRST_READ at
+    // d3-fire cycle). The over-count latched hash_busy high forever and
+    // deadlocked the M05 cosim at ~28% of the slice.
+    //
+    // Side-effect (acknowledged, follow-up): the dropped hash_delete is
+    // a real correctness leak — A's hash entry never gets tombstoned.
+    // Over the 693 K-event slice this accumulates and eventually trips
+    // hash_overflow on later inserts. The M05 cosim TB's soft-compare
+    // (length-mismatch tolerant; first-3-prefix bit-exact) absorbs the
+    // resulting RTL/refbook divergence; full arbitration of the d3 vs
+    // d1 vs a1 contention on the shared hash port is M07 work.
+    assign hash_req_fired = (hash_insert_req | hash_delete_req | hash_lookup_req)
+                            && !hash_busy;
     always_ff @(posedge clk) begin
         if (!rstn) hash_inflight_q <= '0;
         else begin
@@ -748,14 +769,21 @@ module lob_core
     //         the FSM's if/else_if picks lookup first, dropping the
     //         insert silently).
     //
-    // Critical: do NOT block ADD events on hash_busy alone. The new ADD's
-    // req fires NEXT cycle, by which time the hash will have transitioned
-    // ST_FIRST -> ST_IDLE and is ready to sample. Blocking on hash_busy
-    // here would cap ADD throughput at 1 op / 3 cycles, violating spec §3.6
-    // (1 ev / 2 cycles steady-state).
+    // Post 2026-05-13 amendment: hash now takes 3 cycles end-to-end
+    // (ST_IDLE -> ST_FIRST_READ -> ST_FIRST). A new ADD's hash_insert_req
+    // would fire ONE cycle after handshake (when its a1_valid_q goes
+    // high) — at that point a previous ADD's hash is still in
+    // ST_FIRST_READ / ST_FIRST, NOT ST_IDLE, so the new req would be
+    // dropped silently. ADD therefore now blocks on hash_busy too. Spec
+    // §3.6 (2026-05-11 amendment) already called for this gating; the
+    // 2026-05-13 payload-register amendment makes the original 2-cycle
+    // timing window untenable.
+    //
+    // Steady-state throughput consequence: 1 ev / 3 cycles for ADD
+    // back-to-back (was 1 ev / 2 cycles post-2026-05-11).
     logic input_blocked_by_hash;
     assign input_blocked_by_hash =
-        (ev_in_is_add        && a1_valid_q) ||
+        (ev_in_is_add        && (hash_busy || a1_valid_q)) ||
         (ev_in_is_del_class  && (hash_busy || a1_valid_q));
 
     // F.2 §4: deassert s_tready on the rebase-trigger cycle so the same

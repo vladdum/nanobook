@@ -26,27 +26,46 @@
 //   of the URAM read, not the URAM read itself.
 //
 //   Amended FSM (3 states): ST_IDLE samples req and registers first_idx
-//   into first_idx_q; ST_FIRST decides hit/miss using row_first
-//   (combinational read of table_ram[first_idx_q]); ST_PROBE continues
+//   into first_idx_q; ST_FIRST decided hit/miss using row_first
+//   (combinational read of table_ram[first_idx_q]); ST_PROBE continued
 //   multi-probe traversal with the same combinational read pattern
-//   (row_at_probe tracks table_ram[probe_idx]). The timing fix is that
-//   the first-probe BUCKET INDEX is now registered — the URAM read
-//   itself stays combinational on a register, giving the Fmax-friendly
-//   stage register -> URAM read -> decision logic -> write-CE register
-//   (identical pattern to ST_PROBE). Each op takes 2 cycles end-to-end
-//   (was 1). Subsequent probes pipeline at 1 cycle each. Steady-state
-//   throughput = 1 op / 2 cycles (was 1/cycle).
-//
-//   Note: an earlier draft of this amendment registered the URAM READ
-//   OUTPUT (row_first_probe_q <= table_ram[first_idx_q]) instead of
-//   relying on the registered bucket index. That was a bug: NBA
-//   ordering meant row_first_probe_q latched table_ram[OLD first_idx_q]
-//   on the same edge first_idx_q took its new value, so ST_FIRST
-//   decided on the WRONG bucket the next cycle. Fixed by reverting to a
-//   combinational row_first read on the (already registered) first_idx_q.
+//   (row_at_probe tracked table_ram[probe_idx]).
 //
 //   Spec authority: docs/superpowers/specs/2026-05-09-nanobook-m05-book-
 //   core-uram-design.md §3.6 (2026-05-11 amendment).
+//
+// 2026-05-13 amendment — registered URAM PAYLOAD READ:
+//   The 2026-05-11 amendment registered the bucket INDEX before the URAM
+//   read; the payload read itself stayed combinational on the already-
+//   registered first_idx_q / probe_idx. Vivado infers UltraRAM only when
+//   the data port is also registered, so the table_ram array still fell
+//   back to flip-flops at the smoke config (it was the second-largest
+//   FF source in the M06 Phase J OOC synth, after price_ladder.levels).
+//
+//   The FSM now reads the payload through dedicated row registers:
+//     - ST_IDLE       : sample req, register first_idx_q -> ST_FIRST_READ
+//     - ST_FIRST_READ : NBA row_first_q <= table_ram[first_idx_q]
+//                       -> ST_FIRST
+//     - ST_FIRST      : decide on row_first_q. Hit/miss -> ST_IDLE.
+//                       Collide -> ST_PROBE_READ with probe_idx <- first+1
+//     - ST_PROBE_READ : NBA row_probe_q <= table_ram[probe_idx]
+//                       -> ST_PROBE
+//     - ST_PROBE      : decide on row_probe_q. Hit/miss -> ST_IDLE.
+//                       Collide -> ST_PROBE_READ with probe_idx++
+//
+//   Latency consequence (spec §3.6, §6):
+//     - First-probe hit / miss: 3 cycles end-to-end (was 2 post-amendment;
+//       was 1 pre-amendment).
+//     - Each subsequent probe: 2 cycles (was 1 post-amendment).
+//     - Steady-state throughput: 1 op / 3 cycles for the first-probe-hit
+//       hot path (was 1 op / 2 cycles).
+//
+//   Why this is the right shape: registering both stages of the URAM read
+//   (index then payload) is exactly the pattern Vivado expects for a
+//   2-cycle URAM read. The same NBA-ordering issue that caused the
+//   2026-05-11 earlier draft to register row_first_probe_q in ST_IDLE is
+//   avoided by reading the payload from a DEDICATED state (ST_FIRST_READ
+//   / ST_PROBE_READ) where the bucket index has already settled.
 //
 //   The req_blocked latch is replaced by a `last_done_q + last_oid_q` guard
 //   that ignores held-high reqs *only* when the held oid matches the one
@@ -143,34 +162,32 @@ module order_id_hash
     endfunction
 
     // ------------------------------------------------------------------
-    // FSM (post-2026-05-11 amendment) — 3 states:
-    //   ST_IDLE  : sample req; register first_idx_q, saved_oid, is_*;
-    //              transition to ST_FIRST. Do NOT assert op_done.
-    //   ST_FIRST : decide hit/miss using row_first (combinational
-    //              read of table_ram[first_idx_q] — the bucket index is
-    //              already registered, so the arc here is register ->
-    //              URAM read -> decision logic -> write-CE register, a
-    //              clean Fmax stage identical to ST_PROBE). On collide,
-    //              transition to ST_PROBE with probe_idx <- first_idx_q+1
-    //              and probe_depth <- 1.
-    //   ST_PROBE : continue probing using row_at_probe (combinational
-    //              read of table_ram[probe_idx]); on collide, advance
-    //              probe_idx and probe_depth. Exits to ST_IDLE on
-    //              hit / miss-empty / overflow.
-    //              Note: row_at_probe is combinational on purpose. The
-    //              amendment's timing fix targets the FIRST probe path
-    //              (where the bucket index was a long hash chain from
-    //              order_id). PROBE iterations already start from the
-    //              probe_idx register, so the timing arc here is
-    //              register -> URAM read -> decide -> write-CE register
-    //              -- a clean Fmax stage. An extra register on PROBE
-    //              would force a wait cycle between iterations and
-    //              defeat the spec's "subsequent probes pipeline at 1
-    //              cycle each" guarantee.
+    // FSM (post-2026-05-13 amendment) — 5 states:
+    //   ST_IDLE        : sample req; register first_idx_q, saved_oid,
+    //                    is_*; transition to ST_FIRST_READ.
+    //   ST_FIRST_READ  : issue the URAM read for the first probe — NBA
+    //                    row_first_q <= table_ram[first_idx_q]. The
+    //                    bucket index is already a register at this
+    //                    point, so the Vivado URAM cell sees registered
+    //                    address -> registered data. State transitions
+    //                    to ST_FIRST.
+    //   ST_FIRST       : decide hit/miss using row_first_q (the payload
+    //                    registered in ST_FIRST_READ). On collide,
+    //                    transition to ST_PROBE_READ with probe_idx <-
+    //                    first_idx_q+1 and probe_depth <- 1.
+    //   ST_PROBE_READ  : issue the URAM read for the current probe —
+    //                    NBA row_probe_q <= table_ram[probe_idx].
+    //                    Transition to ST_PROBE.
+    //   ST_PROBE       : decide using row_probe_q. On collide, advance
+    //                    probe_idx and probe_depth, transition back to
+    //                    ST_PROBE_READ. Exits to ST_IDLE on hit /
+    //                    miss-empty / overflow.
     // ------------------------------------------------------------------
-    typedef enum logic [1:0] {
+    typedef enum logic [2:0] {
         ST_IDLE,
+        ST_FIRST_READ,
         ST_FIRST,
+        ST_PROBE_READ,
         ST_PROBE
     } state_e;
 
@@ -188,13 +205,26 @@ module order_id_hash
     logic [SLOT_IDX_W-1:0]        slot_idx_out_q;
     // Held-req guard — replaces the original req_blocked latch. After a
     // completion at edge K, last_done_q=1 and last_oid_q=<that oid> for
-    // cycle K+1 only. A held-high req in cycle K+1 with the same oid is
-    // ignored (TB pattern); a different oid in cycle K+1 is processed
-    // (orchestrator pattern).
+    // cycle K+1 only. A held-high req in cycle K+1 with the same oid AND
+    // the same op-type as the just-completed op is ignored (TB pattern);
+    // a different oid OR a different op-type on the same oid is processed
+    // (orchestrator pattern: ADD followed by an immediate Cancel/Exec on
+    // the same order_id is common in real ITCH).
+    //
+    // The op-type check uses the registered is_insert/is_delete/is_lookup
+    // flags (set in ST_IDLE for the previous op, persistent through to the
+    // cycle after op_done). Pre-fix the guard suppressed the new req
+    // without that check, which deadlocked the orchestrator: the new req
+    // fired hash_req_fired=1 for one cycle, incremented hash_inflight_q,
+    // but the FSM stayed in ST_IDLE — so no op_done ever fired, hash_busy
+    // latched high forever, and the lob_core s_tready stuck at 0.
     logic                         last_done_q;
     logic [63:0]                  last_oid_q;
     logic                         ignore_held_req;
-    assign ignore_held_req = last_done_q && (order_id == last_oid_q);
+    assign ignore_held_req = last_done_q && (order_id == last_oid_q)
+                             && (   (is_insert && insert_req)
+                                 || (is_delete && delete_req)
+                                 || (is_lookup && lookup_req));
 
     assign hash_probe_max = probe_max_q;
     assign hash_overflow  = overflow_q;
@@ -208,25 +238,17 @@ module order_id_hash
     always_comb first_h   = hash64(order_id);
     always_comb first_idx = first_h[BUCKET_W-1:0];
 
-    // ST_FIRST: combinational read of table_ram[first_idx_q]. The
-    // first_idx_q register is the start of this 1-cycle path, so the
-    // critical path here is register -> URAM read -> decision logic ->
-    // write-CE register, which is a clean Fmax-friendly stage. The
-    // amendment's timing fix targets the FIRST path by registering the
-    // BUCKET INDEX (the long combinational hash from order_id was the
-    // problem, not the row output).
+    // Registered payload reads (post 2026-05-13 amendment). The URAM
+    // address comes from already-registered first_idx_q / probe_idx, and
+    // the payload is latched into row_first_q / row_probe_q in
+    // ST_FIRST_READ / ST_PROBE_READ. Vivado therefore infers UltraRAM
+    // with both the address and data ports registered, satisfying the
+    // ram_style="ultra" hint. The _pad bits of the struct are stored but
+    // never decoded — UNUSEDSIGNAL is fine.
     /* verilator lint_off UNUSEDSIGNAL */
-    row_t row_first;
+    row_t row_first_q;
+    row_t row_probe_q;
     /* verilator lint_on UNUSEDSIGNAL */
-    always_comb row_first = table_ram[first_idx_q];
-
-    // ST_PROBE: combinational read of table_ram[probe_idx]. Same pattern
-    // as row_first above — probe_idx is already a register, so the arc
-    // is register -> URAM read -> decide -> write-CE register.
-    /* verilator lint_off UNUSEDSIGNAL */
-    row_t row_at_probe;
-    /* verilator lint_on UNUSEDSIGNAL */
-    always_comb row_at_probe = table_ram[probe_idx];
 
     // probe_depth + 1, sized to 8 b for comparison with stat & MAX_PROBE_DEPTH.
     logic [7:0] probe_depth_p1;
@@ -250,6 +272,8 @@ module order_id_hash
             slot_idx_out_q    <= '0;
             last_done_q       <= 1'b0;
             last_oid_q        <= '0;
+            row_first_q       <= '0;
+            row_probe_q       <= '0;
             for (int i = 0; i < HASH_SLOTS; i++) begin
                 table_ram[i].valid     <= 1'b0;
                 table_ram[i].tombstone <= 1'b0;
@@ -273,8 +297,20 @@ module order_id_hash
                         is_insert   <= insert_req;
                         is_delete   <= delete_req;
                         is_lookup   <= lookup_req;
-                        state       <= ST_FIRST;
+                        state       <= ST_FIRST_READ;
                     end
+                end
+
+                ST_FIRST_READ: begin
+                    // Register the URAM payload using the already-registered
+                    // first_idx_q. The NBA-ordering bug that the 2026-05-11
+                    // amendment file note flagged is avoided because
+                    // first_idx_q was registered one cycle ago (in ST_IDLE),
+                    // so by ST_FIRST_READ it already holds the post-NBA
+                    // value. table_ram[first_idx_q] is therefore the correct
+                    // bucket.
+                    row_first_q <= table_ram[first_idx_q];
+                    state       <= ST_FIRST;
                 end
 
                 ST_FIRST: begin
@@ -282,14 +318,14 @@ module order_id_hash
                     if (8'd1 > probe_max_q) probe_max_q <= 8'd1;
 
                     if (is_lookup) begin
-                        if (row_first.valid && row_first.order_id == saved_oid) begin
-                            slot_idx_out_q <= row_first.slot_idx;
+                        if (row_first_q.valid && row_first_q.order_id == saved_oid) begin
+                            slot_idx_out_q <= row_first_q.slot_idx;
                             op_done        <= 1'b1;
                             op_ok          <= 1'b1;
                             last_done_q    <= 1'b1;
                             last_oid_q     <= saved_oid;
                             state          <= ST_IDLE;
-                        end else if (!row_first.valid && !row_first.tombstone) begin
+                        end else if (!row_first_q.valid && !row_first_q.tombstone) begin
                             op_done     <= 1'b1;
                             op_ok       <= 1'b0;
                             last_done_q <= 1'b1;
@@ -298,10 +334,10 @@ module order_id_hash
                         end else begin
                             probe_depth <= PROBE_CW'(1);
                             probe_idx   <= first_idx_q + BUCKET_W'(1);
-                            state       <= ST_PROBE;
+                            state       <= ST_PROBE_READ;
                         end
                     end else if (is_insert) begin
-                        if (!row_first.valid || row_first.tombstone) begin
+                        if (!row_first_q.valid || row_first_q.tombstone) begin
                             table_ram[first_idx_q].valid     <= 1'b1;
                             table_ram[first_idx_q].tombstone <= 1'b0;
                             table_ram[first_idx_q].order_id  <= saved_oid;
@@ -314,10 +350,10 @@ module order_id_hash
                         end else begin
                             probe_depth <= PROBE_CW'(1);
                             probe_idx   <= first_idx_q + BUCKET_W'(1);
-                            state       <= ST_PROBE;
+                            state       <= ST_PROBE_READ;
                         end
                     end else /* is_delete */ begin
-                        if (row_first.valid && row_first.order_id == saved_oid) begin
+                        if (row_first_q.valid && row_first_q.order_id == saved_oid) begin
                             table_ram[first_idx_q].valid     <= 1'b0;
                             table_ram[first_idx_q].tombstone <= 1'b1;
                             op_done     <= 1'b1;
@@ -325,7 +361,7 @@ module order_id_hash
                             last_done_q <= 1'b1;
                             last_oid_q  <= saved_oid;
                             state       <= ST_IDLE;
-                        end else if (!row_first.valid && !row_first.tombstone) begin
+                        end else if (!row_first_q.valid && !row_first_q.tombstone) begin
                             op_done     <= 1'b1;
                             op_ok       <= 1'b0;
                             last_done_q <= 1'b1;
@@ -334,9 +370,19 @@ module order_id_hash
                         end else begin
                             probe_depth <= PROBE_CW'(1);
                             probe_idx   <= first_idx_q + BUCKET_W'(1);
-                            state       <= ST_PROBE;
+                            state       <= ST_PROBE_READ;
                         end
                     end
+                end
+
+                ST_PROBE_READ: begin
+                    // Same registered-payload pattern as ST_FIRST_READ:
+                    // probe_idx was registered in the previous cycle (either
+                    // from ST_FIRST's collide branch or from ST_PROBE's
+                    // collide branch), so reading table_ram[probe_idx] here
+                    // gives the correct probe bucket.
+                    row_probe_q <= table_ram[probe_idx];
+                    state       <= ST_PROBE;
                 end
 
                 ST_PROBE: begin
@@ -347,14 +393,14 @@ module order_id_hash
                     end
 
                     if (is_lookup) begin
-                        if (row_at_probe.valid && row_at_probe.order_id == saved_oid) begin
-                            slot_idx_out_q <= row_at_probe.slot_idx;
+                        if (row_probe_q.valid && row_probe_q.order_id == saved_oid) begin
+                            slot_idx_out_q <= row_probe_q.slot_idx;
                             op_done        <= 1'b1;
                             op_ok          <= 1'b1;
                             last_done_q    <= 1'b1;
                             last_oid_q     <= saved_oid;
                             state          <= ST_IDLE;
-                        end else if (!row_at_probe.valid && !row_at_probe.tombstone) begin
+                        end else if (!row_probe_q.valid && !row_probe_q.tombstone) begin
                             op_done     <= 1'b1;
                             op_ok       <= 1'b0;
                             last_done_q <= 1'b1;
@@ -370,9 +416,10 @@ module order_id_hash
                         end else begin
                             probe_depth <= probe_depth + PROBE_CW'(1);
                             probe_idx   <= probe_idx + BUCKET_W'(1);
+                            state       <= ST_PROBE_READ;
                         end
                     end else if (is_insert) begin
-                        if (!row_at_probe.valid || row_at_probe.tombstone) begin
+                        if (!row_probe_q.valid || row_probe_q.tombstone) begin
                             table_ram[probe_idx].valid     <= 1'b1;
                             table_ram[probe_idx].tombstone <= 1'b0;
                             table_ram[probe_idx].order_id  <= saved_oid;
@@ -392,9 +439,10 @@ module order_id_hash
                         end else begin
                             probe_depth <= probe_depth + PROBE_CW'(1);
                             probe_idx   <= probe_idx + BUCKET_W'(1);
+                            state       <= ST_PROBE_READ;
                         end
                     end else if (is_delete) begin
-                        if (row_at_probe.valid && row_at_probe.order_id == saved_oid) begin
+                        if (row_probe_q.valid && row_probe_q.order_id == saved_oid) begin
                             table_ram[probe_idx].valid     <= 1'b0;
                             table_ram[probe_idx].tombstone <= 1'b1;
                             op_done     <= 1'b1;
@@ -402,7 +450,7 @@ module order_id_hash
                             last_done_q <= 1'b1;
                             last_oid_q  <= saved_oid;
                             state       <= ST_IDLE;
-                        end else if (!row_at_probe.valid && !row_at_probe.tombstone) begin
+                        end else if (!row_probe_q.valid && !row_probe_q.tombstone) begin
                             op_done     <= 1'b1;
                             op_ok       <= 1'b0;
                             last_done_q <= 1'b1;
@@ -417,6 +465,7 @@ module order_id_hash
                         end else begin
                             probe_depth <= probe_depth + PROBE_CW'(1);
                             probe_idx   <= probe_idx + BUCKET_W'(1);
+                            state       <= ST_PROBE_READ;
                         end
                     end else begin
                         // Defensive fallback — all op-class flags low.
