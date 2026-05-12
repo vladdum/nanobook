@@ -60,9 +60,10 @@ async def _read(dut, side: int, price: int) -> tuple[int, int, int, int]:
     dut.read_req.value = 1
     dut.op_side.value = side
     dut.op_price.value = price
-    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)        # stage 0: capture op + URAM read
     dut.read_req.value = 0
-    await RisingEdge(dut.clk)   # 1-cycle URAM read latency
+    await RisingEdge(dut.clk)        # stage 1: read_head/etc. registered
+    await RisingEdge(dut.clk)        # post 2026-05-13 amendment: outputs settle
     return (
         int(dut.read_head.value),
         int(dut.read_tail.value),
@@ -98,6 +99,10 @@ async def test_out_of_window_bumps_counter(dut):
     cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
     await _reset(dut)
     await _add(dut, side=0, price=WINDOW_BASE - 1, slot=1, shares=10)
+    # Post 2026-05-13 amendment: OOW check fires at stage 1 (1 cycle after
+    # input capture), so the counter is visible one cycle later than under
+    # the M05 single-stage design.
+    await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
     assert int(dut.out_of_window.value) >= 1, \
         f"out_of_window={int(dut.out_of_window.value)}"
@@ -158,9 +163,10 @@ async def _read_level_m06(dut, sym_idx, side, tick) -> dict:
     dut.op_side.value = side
     dut.op_price.value = tick
     dut.read_req.value = 1
-    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)        # stage 0: capture op + URAM read
     dut.read_req.value = 0
-    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)        # stage 1: read_head/etc. registered
+    await RisingEdge(dut.clk)        # post 2026-05-13 amendment: outputs settle
     return {
         "head": int(dut.read_head.value),
         "tail": int(dut.read_tail.value),

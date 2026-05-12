@@ -59,7 +59,7 @@ async def _wait_handshake(dut) -> None:
     dut.s_tvalid.value = 0
 
 
-async def _drive_event_count_cycles_until_delta(dut, ev_word: int, max_cycles: int = 32) -> int:
+async def _drive_event_count_cycles_until_delta(dut, ev_word: int, max_cycles: int = 40) -> int:
     """Drive one event; count rising edges from the handshake edge until
     m_tvalid first asserts. Mirrors tb_lob_core_cycles.py's helper so M05
     and M06 measurements are directly comparable."""
@@ -100,33 +100,42 @@ async def _push_and_drain(dut, ev_word: int, drain_cycles: int = 16) -> None:
 
 
 @cocotb.test()
-async def test_add_4_cycles_regression(dut):
-    """Regression: M05 ADD baseline carries forward — 4 cycles from handshake
-    to m_tvalid (the first ADD emits a tob_delta because best changes)."""
+async def test_add_5_cycles_regression(dut):
+    """Regression: ADD baseline post-2026-05-13 — 5 cycles from handshake
+    to m_tvalid (the first ADD emits a tob_delta because best changes).
+
+    Was 4 cycles pre-2026-05-13. Registering price_ladder.levels (§3.7
+    amendment) adds one cycle to the ladder output, shifting m_tvalid +1.
+    """
     _start_clock(dut)
     await _book.reset(dut)
     n = await _drive_event_count_cycles_until_delta(dut, _add_event(PRICE_BASE + 5, 1))
-    assert n == 4, f"ADD took {n} cycles, expected 4"
+    assert n == 5, f"ADD took {n} cycles, expected 5"
 
 
 @cocotb.test()
 async def test_delete_side_empty_direct_emit_m06(dut):
     """DELETE the only order — side empties → tob_tracker's clr branch emits
     the zero-size delta DIRECTLY (no CLZ). Measures the baseline DELETE-to-
-    emit latency."""
+    emit latency.
+
+    Post-2026-05-13 amendments: 8 cycles (was 6 pre-amendments). The two
+    cycles come from:
+      - +1 from hash payload registration (§3.6 amendment): hash_op_done
+        is one cycle later, so d2 of the orchestrator's DEL pipeline fires
+        one cycle later. This shifts the entire downstream chain by +1.
+      - +1 from price_ladder.levels URAM registration (§3.7 amendment):
+        ladder_del_req → level_evt_valid path is now 2 cycles (was 1).
+        tob_tracker's clr branch sees level_now_empty one cycle later, and
+        m_tvalid_q surfaces another cycle after that.
+    """
     _start_clock(dut)
     await _book.reset(dut)
     # Seed: one bid at PRICE_BASE+5.
     await _push_and_drain(dut, _add_event(PRICE_BASE + 5, 1))
     # DELETE it. Side empties. tob_tracker direct emits side-empty delta.
     n = await _drive_event_count_cycles_until_delta(dut, _del_event(PRICE_BASE + 5, 1))
-    # 6 cycles from handshake to m_tvalid: d1→d2→d3→d4 (4 cycles, with the
-    # 2-cycle hash latency consumed before d2 advances), ladder_del_req
-    # at d4, ladder_level_now_empty visible the cycle after, tob_tracker's
-    # clr-empties-side branch sets m_tvalid_q NBA so m_tvalid surfaces one
-    # cycle later. Establishes the baseline for the CLZ-driven path
-    # comparison below.
-    assert n == 6, f"DELETE-side-empty took {n} cycles, expected 6"
+    assert n == 8, f"DELETE-side-empty took {n} cycles, expected 8"
 
 
 @cocotb.test()
@@ -137,8 +146,16 @@ async def test_delete_clz_driven_emit_m06(dut):
     clr_fu1/clr_fu2 ladder-read pipeline that re-fires update_size_req
     with the correct size from price_ladder).
 
-    The DELTA between this and test_delete_side_empty_direct_emit_m06's 6
-    cycles is what the cycle TB exposes as the CLZ_LATENCY contribution."""
+    Post-2026-05-13 amendments: 14 cycles (was 12 pre-amendments). The two
+    extra cycles come from the same +1 hash payload + +1 ladder URAM read
+    contributions as test_delete_side_empty_direct_emit_m06.
+
+    The DELTA between this and test_delete_side_empty_direct_emit_m06's 8
+    cycles (= 6) is what the cycle TB exposes as the CLZ_LATENCY
+    contribution — this is INVARIANT under the 2026-05-13 amendments
+    because both tests pay the same +2 cycle cost. The cross-check test
+    `test_clz_latency_extra_cycles_match_param` asserts the delta is
+    exactly CLZ_LATENCY + 5."""
     _start_clock(dut)
     await _book.reset(dut)
     # Seed: two bids, one at PRICE_BASE+5 (non-best), one at PRICE_BASE+10 (best).
@@ -148,16 +165,7 @@ async def test_delete_clz_driven_emit_m06(dut):
     # best; lob_core fetches the new best's size via ladder_read; tob_tracker
     # update_size branch emits the delta.
     n = await _drive_event_count_cycles_until_delta(dut, _del_event(PRICE_BASE + 10, 2))
-    # 12 cycles from handshake to m_tvalid at CLZ_LATENCY=1 — 6 cycles for
-    # the baseline DELETE pipeline (see test_delete_side_empty_direct_emit_m06)
-    # plus 6 cycles for the CLZ-driven follow-up: 1 cycle internal kick delay
-    # to let slice_present_q's NBA from the clr cycle land, 2 cycles for the
-    # CLZ s1+s2 pair, 2 cycles for lob_core's clr_fu1 (ladder_read) + clr_fu2
-    # (update_size_req), and 1 cycle for tob_tracker's update_size branch to
-    # register m_tvalid_q. Bumping CLZ_LATENCY to 2 would add one mid-stage
-    # register between s1 and s2 and push this to 13 (see
-    # test_clz_latency_extra_cycles_match_param below).
-    assert n == 12, f"DELETE-CLZ took {n} cycles, expected 12 (CLZ_LATENCY=1)"
+    assert n == 14, f"DELETE-CLZ took {n} cycles, expected 14 (CLZ_LATENCY=1)"
 
 
 @cocotb.test()

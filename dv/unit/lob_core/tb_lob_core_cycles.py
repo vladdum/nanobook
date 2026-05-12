@@ -1,13 +1,15 @@
 """Cycle-accurate TB for lob_core.
 
 Per spec docs/superpowers/specs/2026-05-09-nanobook-m05-book-core-uram-design.md
-§6 (cycle targets table, post-2026-05-11 amendment):
-  - ADD: 4 cycles (input handshake edge -> m_tvalid first asserts)
-  - DELETE: 6 cycles, hash first-probe hit (input handshake edge -> events_in
-    bumps; 1-cycle index register + 1-cycle URAM read + 4-cycle downstream
-    pipeline complete in 6 cycles internally; was 5 pre-amendment §3.6)
-  - Steady-state throughput: 1 event / 2 cycles (back-to-back distinct-price
-    ADDs; bounded by 2-cycle hash latency, §3.6; was 1/cycle pre-amendment)
+§6 (cycle targets table, post-2026-05-13 amendment):
+  - ADD: 5 cycles (input handshake edge -> m_tvalid first asserts; +1 over
+    M05 baseline from registered price_ladder.levels URAM read, §3.7)
+  - DELETE: 7 cycles, hash first-probe hit (input handshake edge -> events_in
+    bumps; M05 baseline 5 + 1 (hash bucket-index reg, 2026-05-11) + 1
+    (hash payload reg, 2026-05-13); was 6 post-2026-05-11)
+  - Steady-state throughput: 1 event / 3 cycles (back-to-back distinct-price
+    ADDs; bounded by the 3-cycle hash latency post-2026-05-13; was 1/2
+    post-2026-05-11, 1/cycle pre-amendment)
   - Filtered events: 1 cycle, never enter ADD/DEL paths
 """
 from __future__ import annotations
@@ -78,8 +80,17 @@ async def _drive_event_count_cycles_until_delta(dut, ev_word: int, max_cycles: i
 
 
 @cocotb.test()
-async def test_add_4_cycles(dut):
-    """ADD pipeline: input handshake -> m_tvalid in 4 cycles (spec §6)."""
+async def test_add_5_cycles(dut):
+    """ADD pipeline: input handshake -> m_tvalid in 5 cycles (spec §6,
+    post-2026-05-13 amendment).
+
+    M05 baseline was 4 cycles. Registering the URAM read in
+    price_ladder.levels (§3.7 amendment) adds one cycle to the ladder
+    output, which moves m_tvalid one cycle later. The hash-side payload
+    register also added (§3.6 amendment) does NOT affect ADD because the
+    ADD path's m_tvalid is gated on level_evt (from the ladder), not on
+    hash_op_done — the hash_insert is fire-and-forget along the ADD path.
+    """
     _start_clock(dut)
     await _book.reset(dut)
     ev = _book.pack_book_event(
@@ -87,16 +98,23 @@ async def test_add_4_cycles(dut):
         price=10000, shares=100, order_id=1, ingress_ts=0,
     )
     n = await _drive_event_count_cycles_until_delta(dut, ev)
-    assert n == 4, f"ADD took {n} cycles, expected 4"
+    assert n == 5, f"ADD took {n} cycles, expected 5"
 
 
 @cocotb.test()
-async def test_delete_6_cycles_first_probe(dut):
-    """DELETE on non-best order: events_in bumps 6 cycles after handshake.
+async def test_delete_7_cycles_first_probe(dut):
+    """DELETE on non-best order: events_in bumps 7 cycles after handshake.
 
-    Post-2026-05-11 amendment (spec §3.6): registered URAM read in
-    order_id_hash adds 1 cycle to the hash lookup, so the DELETE pipeline
-    runs handshake -> events_in in 6 cycles (was 5).
+    Post-2026-05-13 amendment (spec §3.6): registering the hash table_ram
+    PAYLOAD (on top of the 2026-05-11 bucket-index reg) adds another cycle
+    to the hash lookup. The DELETE pipeline runs handshake -> events_in
+    in 7 cycles (was 6 post-2026-05-11, 5 pre-amendment).
+
+    Note: this measurement is events_in-based, so the price_ladder URAM
+    read amendment (§3.7) does NOT affect this count — events_in is bumped
+    on the orchestrator's d-stages independent of ladder output. The
+    ladder change shifts m_tvalid (measured by tb_lob_core_cycles_m06),
+    not events_in.
 
     Non-best DELETE emits no tob_delta (best stays unchanged) so we measure
     completion via the events_in counter, which the orchestrator bumps at
@@ -130,9 +148,9 @@ async def test_delete_6_cycles_first_probe(dut):
     while int(dut.events_in.value) == initial:
         await RisingEdge(dut.clk)
         n += 1
-        if n > 12:
+        if n > 16:
             raise TimeoutError(f"events_in never bumped (still {initial})")
-    assert n == 6, f"DELETE took {n} cycles, expected 6 (post-2026-05-11)"
+    assert n == 7, f"DELETE took {n} cycles, expected 7 (post-2026-05-13)"
 
 
 @cocotb.test()
@@ -161,29 +179,32 @@ async def test_filtered_event_dropped_no_delta(dut):
 
 
 @cocotb.test()
-async def test_steady_state_one_event_per_two_cycles(dut):
-    """100 back-to-back distinct-price ADDs retire in 2*N + drain cycles.
+async def test_steady_state_one_event_per_three_cycles(dut):
+    """100 back-to-back distinct-price ADDs retire in 3*N + drain cycles.
 
-    Post-2026-05-11 amendment (spec §3.6): hash 2-cycle latency means a new
-    ADD can be accepted only every other cycle (orchestrator's hash_busy
-    stall extended from DEL-class only to also gate ADD). 100 events
-    therefore retire in 2*N_EVENTS + drain (pipeline-depth) cycles, not
-    N_EVENTS + drain as pre-amendment.
+    Post-2026-05-13 amendment (spec §3.6): hash 3-cycle latency means a new
+    ADD can be accepted only every third cycle (orchestrator's hash_busy
+    stall gates ADD acceptance for the duration of an in-flight hash op).
+    Was 2*N + drain post-2026-05-11.
 
     Additionally asserts that the hash_busy stall actually fires — at least
-    one cycle saw s_tready=0 while s_tvalid=1 (a regression on the stall
-    extension would let all 100 ADDs through in <2N cycles, which still
-    passes a generous bound but breaks the throughput contract)."""
+    2*(N-1) cycles saw s_tready=0 while s_tvalid=1 (the 3-cycle hash
+    occupies 2 stall cycles between accepted events). A regression on the
+    stall extension would let all 100 ADDs through in <3N cycles, which
+    still passes a generous bound but breaks the throughput contract."""
     _start_clock(dut)
     await _book.reset(dut)
     initial = int(dut.events_in.value)
     dut.m_tready.value = 1
 
     N_EVENTS = 100
-    # Pre-amendment expectation was N_EVENTS + drain. Post-amendment:
-    # 2*N_EVENTS + drain (hash is busy every other cycle).
-    drain = 16  # comfortably > pipeline depth
-    max_cycles = 2 * N_EVENTS + drain
+    # Post-2026-05-13 amendment: 3 cycles per event (hash bound). With
+    # HASH_SLOTS=512 and 100 oids, expect ~10 collisions adding 2 cycles
+    # each (each extra probe is 2 cycles in the new pipeline) — round to
+    # a generous 5*N + drain bound so the test stays robust if more oids
+    # collide than the birthday-paradox average predicts.
+    drain = 16
+    max_cycles = 5 * N_EVENTS + drain
 
     observed_stall_cycles = 0
     elapsed = 0
@@ -216,7 +237,8 @@ async def test_steady_state_one_event_per_two_cycles(dut):
     assert events_in_q_final == N_EVENTS, (
         f"only {events_in_q_final} of {N_EVENTS} events retired"
     )
-    assert observed_stall_cycles >= N_EVENTS - 1, (
-        f"expected >= {N_EVENTS-1} hash_busy stall cycles, got "
+    # 3-cycle hash → 2 stall cycles between accepted events.
+    assert observed_stall_cycles >= 2 * (N_EVENTS - 1), (
+        f"expected >= {2 * (N_EVENTS - 1)} hash_busy stall cycles, got "
         f"{observed_stall_cycles}; the orchestrator's ADD stall may be missing"
     )
