@@ -1,7 +1,15 @@
-TOPLEVEL := lob_core
-MODULE   := tb_lob_core_smoke
-# Phase H wires the orchestrator + 4 sub-modules; lob_core_params_pkg now
-# imports + sub-module sources are required here too.
+TOPLEVEL  := lob_core
+MODULE    := tb_lob_core_cycles_m06
+# Dedicated sim_build dir — Verilator bakes -G overrides at compile time, so a
+# shared dir would silently reuse whichever binary built first (see the
+# comment in Makefile.cycles for the failure mode that bit m05_exit.sh).
+SIM_BUILD := sim_build_lob_core_cycles_m06
+
+# Mirrors Makefile.cycles' source order: book_event_pkg → lob_core_params_pkg
+# → sub-modules → top. Phase E (sym_idx_lut.sv) and Phase F (per_sym_state.sv)
+# are not yet in the list; the cycle tests here run pre-E/F. The full G.1 set
+# (test_add_rebase_5_cycles, test_stale_delete_3_cycles,
+# test_cross_sym_back_to_back_no_stall) lands after those phases.
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
@@ -14,11 +22,10 @@ VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
 
-# Sim-time sizing: small POOL/HASH/window so the Verilator build is fast.
-# Post-E.2: SYMBOL_FILTER_ID is no longer the input filter (sym_idx_lut is),
-# so the override is dropped; the package default 5754 (AAPL) is in the LUT
-# at sym_idx=0 and the smoke TB now drives stock_locate=5754.
-EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=64
-EXTRA_ARGS += -GPOOL_SLOTS=64 -GHASH_SLOTS=512
+# Sim-only sizing. Post-E.2: SYMBOL_FILTER_ID is no longer the input filter
+# (sym_idx_lut is), so the override is dropped; package default 5754 (AAPL)
+# is the stock_locate the cycle TB drives.
+EXTRA_ARGS += -GWINDOW_BASE_TICK=10000 -GWINDOW_SIZE_TICKS=128
+EXTRA_ARGS += -GPOOL_SLOTS=256 -GHASH_SLOTS=512
 
 include $(dir $(lastword $(MAKEFILE_LIST)))Makefile

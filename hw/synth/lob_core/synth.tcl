@@ -22,6 +22,9 @@ create_project -in_memory -part xcu50-fsvh2104-2-e
 # AFTER read_verilog so it applies to elaboration.
 read_verilog -sv "$ITCH_DIR/book_event_pkg.sv"
 read_verilog -sv "$LOB_DIR/lob_core_params_pkg.sv"
+read_verilog -sv "$LOB_DIR/lob_core_sym_pkg.sv"
+read_verilog -sv "$LOB_DIR/sym_idx_lut.sv"
+read_verilog -sv "$LOB_DIR/per_sym_state.sv"
 read_verilog -sv "$LOB_DIR/order_pool.sv"
 read_verilog -sv "$LOB_DIR/order_id_hash.sv"
 read_verilog -sv "$LOB_DIR/price_ladder.sv"
@@ -65,7 +68,8 @@ read_xdc "$REPO_ROOT/hw/synth/lob_core/timing.xdc"
 synth_design -top lob_core -mode out_of_context -flatten_hierarchy rebuilt \
     -generic POOL_SLOTS=512 \
     -generic HASH_SLOTS=4096 \
-    -generic WINDOW_SIZE_TICKS=512
+    -generic WINDOW_SIZE_TICKS=512 \
+    -generic N_SYMBOLS=4
 
 opt_design
 

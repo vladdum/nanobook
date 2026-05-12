@@ -10,9 +10,14 @@
 //     too small for URAM packing, lives in flops/distRAM.
 //   - best_{bid,ask}_idx_q / best_{bid,ask}_size_q / best_{bid,ask}_valid_q.
 //
-// CLZ: 1-stage flat priority encoder (combinational `for` loop with `break`).
-// M06 will pipeline this into a 64x64 CLZ for performance — for M05 the
-// 4096-bit flat encoder closes timing per the spec §3.1 budget.
+// CLZ (M06 D.1–D.3): 2-stage 64×64 hierarchical priority encoder.
+//   Stage 1: outer CLZ on slice_present_q[sym][side] (FF, 64 bits).
+//   Stage 2: inner CLZ on slice_bitmap_ram[winning slice] (URAM, 64 bits).
+// External (TB) kicks via clz_kick / clz_result_* are exercised by
+// dv/unit/lob_core/tb_tob_tracker. Internal kicks fire automatically on
+// clr-empties-best and drive pending_clr_* for the lob_core orchestrator
+// to follow up via update_size_req. Latency: 3 cycles clr → pending_clr_o
+// (1 cycle internal kick delay + s1 + s2).
 //
 // Output: 256-bit AXI-S beat carrying tob_delta_t whenever best changes
 // (price OR size). m_tvalid_q is registered, asserts for one cycle per emit.
@@ -37,7 +42,9 @@ module tob_tracker
 #(
     parameter int unsigned WINDOW_BASE_TICK  = lob_core_params_pkg::WINDOW_BASE_TICK,
     parameter int unsigned WINDOW_SIZE_TICKS = lob_core_params_pkg::WINDOW_SIZE_TICKS,
-    parameter int unsigned SYMBOL_FILTER_ID  = lob_core_params_pkg::SYMBOL_FILTER_ID
+    parameter int unsigned SYMBOL_FILTER_ID  = lob_core_params_pkg::SYMBOL_FILTER_ID,
+    parameter int unsigned N_SYMBOLS         = lob_core_params_pkg::N_SYMBOLS,
+    parameter int unsigned SYM_IDX_W         = lob_core_params_pkg::SYM_IDX_W
 ) (
 /* verilator lint_on VARHIDDEN */
 /* verilator lint_on UNUSEDPARAM */
@@ -57,6 +64,11 @@ module tob_tracker
     // event that caused it). Branches below use this in place of the
     // M05-Phase-G hardcoded ADD/DELETE/EXEC values.
     input  logic [7:0]        op_reason,
+
+    // M06: symbol routing index. Selects which per-sym best register to read/update.
+    // Default tie-off in lob_core's instantiation is '0 (single-sym mode) until
+    // Phase F wires the real value through the orchestrator.
+    input  logic [SYM_IDX_W-1:0]       op_sym_idx,
 
     // Wall-clock for emit_ts (driven by lob_core or upstream counter)
     input  logic [63:0]       cur_ts,
@@ -81,7 +93,21 @@ module tob_tracker
     output logic              pending_clr_side_o,
     output logic [31:0]       pending_clr_price_o,
     output logic [63:0]       pending_clr_ingress_ts_o,
-    output logic [7:0]        pending_clr_reason_o
+    output logic [7:0]        pending_clr_reason_o,
+    // M06 F.2 §1: sym_idx of the clr-empties-best emit. Drives lob_core's
+    // clr_fu_sym_idx_q latch so the clr_fu1 ladder_read targets the right
+    // per-sym slot. Driven from clz_internal_sym_q at the CLZ-result
+    // emit cycle (latched on the pending_clr_valid_o pulse).
+    output logic [SYM_IDX_W-1:0] pending_clr_sym_idx_o,
+
+    // M06 2-stage CLZ kick interface (D.2). Used by tb_tob_tracker for the
+    // pipelined-CLZ correctness tests. D.3 will wire this internally into
+    // the emit path; for D.2 these are TB-only outputs.
+    input  logic                       clz_kick,
+    input  logic [SYM_IDX_W-1:0]       clz_kick_sym,
+    input  logic                       clz_kick_side,  // 0=bid (find MSB), 1=ask (find LSB)
+    output logic                       clz_result_valid,
+    output logic [11:0]                clz_result_tick  // global tick index
 );
     localparam int unsigned IDX_W = $clog2(WINDOW_SIZE_TICKS);
 
@@ -116,55 +142,101 @@ module tob_tracker
     // -----------------------------------------------------------------
     // State
     // -----------------------------------------------------------------
+    // F.2 §6: bid/ask_bitmap_q are kept as debug-only state (Phase H/I
+    // integration TBs may probe them) but no longer consumed by the
+    // emit decision — that uses per-sym slice_present_q now.
+    /* verilator lint_off UNUSEDSIGNAL */
     logic [WINDOW_SIZE_TICKS-1:0] bid_bitmap_q;
     logic [WINDOW_SIZE_TICKS-1:0] ask_bitmap_q;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     logic [IDX_W-1:0]  best_bid_idx_q;
     logic [IDX_W-1:0]  best_ask_idx_q;
+
+    // M06 hierarchical bitmap (D.1).
+    // Level 1: slice_present[sym][side][slice] — 1 bit per slice of 64 ticks
+    //   Total: N_SYMBOLS × 2 × 64 bits = 16,384 FFs at default. Cheap.
+    // Level 2: slice_bitmap[sym][side][slice] — 64-bit bitmap per slice
+    //   Total: N_SYMBOLS × 2 × 64 entries × 64 bits = 800 Kbit. URAM-backed.
+    //   Access pattern: 1 RMW per set_bit_req / clr_bit_req.
+    localparam int unsigned N_SLICES = WINDOW_SIZE_TICKS / 64;   // 64 at default
+    // $clog2(1) = 0 which is a zero-width type; floor at 1 so sl is always
+    // at least 1 bit wide.  When N_SLICES == 1 the only legal value is 0.
+    localparam int unsigned SLICE_W  = (N_SLICES > 1) ? $clog2(N_SLICES) : 1;
+    // Address into slice_bitmap_ram: one entry per (sym, side, slice) triple.
+    // Total entries = N_SYMBOLS * 2 * N_SLICES; address is $clog2 of that.
+    localparam int unsigned SLICE_BITMAP_ADDR_W = $clog2(N_SYMBOLS * 2 * N_SLICES);
+
+    logic [N_SLICES-1:0] slice_present_q [N_SYMBOLS][2];
+
+    /* verilator lint_off UNUSEDPARAM */
+    (* ram_style = "ultra" *)
+    logic [63:0] slice_bitmap_ram [N_SYMBOLS * 2 * N_SLICES];
+    /* verilator lint_on UNUSEDPARAM */
+
+    // M06: per-sym best registers indexed by op_sym_idx.
     /* verilator lint_off UNUSEDSIGNAL */
     // best_*_size_q are part of the spec's tracker state and will be
     // read by lob_core during the EXEC fast-path in Phase H; for the
     // standalone tracker they are only written.
-    logic [31:0]       best_bid_size_q;
-    logic [31:0]       best_ask_size_q;
+    // best_*_tick_q are likewise tob_tracker state read once Phase F+H
+    // threads tob_tracker.op_sym_idx and consumes them on the
+    // multi-symbol-aware emit path; until then they are write-only.
+    logic [31:0]       best_bid_size_q  [N_SYMBOLS];
+    logic [31:0]       best_ask_size_q  [N_SYMBOLS];
+    logic [31:0]       best_bid_tick_q  [N_SYMBOLS];
+    logic [31:0]       best_ask_tick_q  [N_SYMBOLS];
     /* verilator lint_on UNUSEDSIGNAL */
-    logic              best_bid_valid_q;
-    logic              best_ask_valid_q;
+    logic              best_bid_valid_q [N_SYMBOLS];
+    logic              best_ask_valid_q [N_SYMBOLS];
 
     tob_delta_t delta_q;
     logic       m_tvalid_q;
 
     // -----------------------------------------------------------------
-    // Combinational helpers — 1-stage flat priority encoders.
+    // M06 D.3 — CLZ-driven new-best emit state.
+    //
+    // When clr_bit_req empties the current best level AND the side stays
+    // non-empty after the clear, we DO NOT use the M05 flat priority
+    // encoder to discover the new best. Instead we kick the 2-stage
+    // 64×64 CLZ pipeline (D.1/D.2) one cycle later — by then the NBA
+    // updates to slice_present_q / slice_bitmap_ram from the clr cycle
+    // have landed, so stage 1 sees the post-clr view.
+    //
+    // clz_internal_kick_q     — 1-cycle pulse, drives s1 kick next cycle.
+    // clz_internal_pending_q  — set on clr-empties-best, cleared when the
+    //                           CLZ result emits pending_clr_valid_o.
+    // clz_internal_{sym,side,ingress_ts,reason}_q — context latched at
+    //                           the clr cycle; replayed into the
+    //                           pending_clr_* outputs when the result
+    //                           lands ~3 cycles later.
+    //
+    // best_*_idx_q / best_*_tick_q are deferred to CLZ result time
+    // (instead of being updated at the clr cycle). The lob_core
+    // orchestrator must avoid issuing new set/clr/upd ops while
+    // clz_internal_pending_q is high — Phase F enforces this via
+    // per_sym_state's epoch-read stall.
     // -----------------------------------------------------------------
-    function automatic logic [IDX_W-1:0] highest_set_bit
-        (input logic [WINDOW_SIZE_TICKS-1:0] v);
-        logic [IDX_W-1:0] r;
-        r = '0;
-        for (int i = WINDOW_SIZE_TICKS - 1; i >= 0; i--) begin
-            if (v[i]) begin
-                r = IDX_W'(i);
-                break;
-            end
-        end
-        return r;
-    endfunction
+    logic                       clz_internal_kick_q;
+    logic                       clz_internal_pending_q;
+    logic [SYM_IDX_W-1:0]       clz_internal_sym_q;
+    logic                       clz_internal_side_q;
+    logic [63:0]                clz_internal_ingress_ts_q;
+    logic [7:0]                 clz_internal_reason_q;
 
-    function automatic logic [IDX_W-1:0] lowest_set_bit
-        (input logic [WINDOW_SIZE_TICKS-1:0] v);
-        logic [IDX_W-1:0] r;
-        r = '0;
-        for (int i = 0; i < WINDOW_SIZE_TICKS; i++) begin
-            if (v[i]) begin
-                r = IDX_W'(i);
-                break;
-            end
-        end
-        return r;
-    endfunction
+    // -----------------------------------------------------------------
+    // Combinational helpers. D.3 replaced the M05 flat priority encoders
+    // (highest/lowest_set_bit over the 4096-bit bitmap) with the 2-stage
+    // 64×64 CLZ pipeline below. F.2 §6 then replaced the global
+    // `any_set` side-empty check with a per-sym hierarchical check
+    // inlined into the clr branch (post_clr_sp).
+    // -----------------------------------------------------------------
 
-    function automatic logic any_set(input logic [WINDOW_SIZE_TICKS-1:0] v);
-        return |v;
+    // Bit-reversal helper for CLZ ask-side (find LSB = find MSB of reversed).
+    function automatic logic [63:0] reverse64(input logic [63:0] x);
+        logic [63:0] r;
+        for (int i = 0; i < 64; i++) r[i] = x[63 - i];
+        return r;
     endfunction
 
     // -----------------------------------------------------------------
@@ -238,10 +310,23 @@ module tob_tracker
             ask_bitmap_q     <= '0;
             best_bid_idx_q   <= '0;
             best_ask_idx_q   <= '0;
-            best_bid_size_q  <= '0;
-            best_ask_size_q  <= '0;
-            best_bid_valid_q <= 1'b0;
-            best_ask_valid_q <= 1'b0;
+            for (int i = 0; i < N_SYMBOLS; i++) begin
+                best_bid_tick_q[i]  <= '0;
+                best_bid_size_q[i]  <= '0;
+                best_bid_valid_q[i] <= 1'b0;
+                best_ask_tick_q[i]  <= '0;
+                best_ask_size_q[i]  <= '0;
+                best_ask_valid_q[i] <= 1'b0;
+            end
+            for (int s = 0; s < N_SYMBOLS; s++) begin
+                for (int si = 0; si < 2; si++) begin
+                    slice_present_q[s][si] <= '0;
+                end
+            end
+            // slice_bitmap_ram doesn't need reset — URAM doesn't init on reset
+            // in real silicon. Verilator sim treats unwritten URAM as 0, which
+            // matches the slice_present_q='0 invariant: nothing visible until
+            // the first set_bit_req.
             delta_q                  <= '0;
             m_tvalid_q               <= 1'b0;
             pending_clr_valid_o      <= 1'b0;
@@ -249,20 +334,80 @@ module tob_tracker
             pending_clr_price_o      <= '0;
             pending_clr_ingress_ts_o <= '0;
             pending_clr_reason_o     <= '0;
+            pending_clr_sym_idx_o    <= '0;
+            clz_internal_kick_q       <= 1'b0;
+            clz_internal_pending_q    <= 1'b0;
+            clz_internal_sym_q        <= '0;
+            clz_internal_side_q       <= 1'b0;
+            clz_internal_ingress_ts_q <= '0;
+            clz_internal_reason_q     <= '0;
         end else begin
             // Default: deassert m_tvalid each cycle. delta_q is sticky
             // (last-emitted value persists when m_tvalid drops).
             m_tvalid_q          <= 1'b0;
             // pending_clr_valid_o pulses for 1 cycle only.
             pending_clr_valid_o <= 1'b0;
+            // Internal CLZ kick pulses for 1 cycle only — it fires the
+            // cycle AFTER the clr that triggered it, so the next-cycle
+            // s1 read sees the post-NBA slice_present_q.
+            clz_internal_kick_q <= 1'b0;
+
+            // D.3 CLZ-result emit: when stage 2 lands AND we have an
+            // internal pending (i.e. this result was kicked by an
+            // empties-best clr, not a TB-driven external kick), pulse
+            // pending_clr_valid_o and update the per-sym best regs.
+            //
+            // clz_s2_valid_q is set on cycle (kick+2). For our 1-cycle
+            // internal kick delay, that's (clr+3). The orchestrator's
+            // clr-followup pipeline triggers off pending_clr_valid_o so
+            // total clr-to-emit latency increases by ~3 cycles vs M05.
+            if (clz_s2_valid_q && clz_internal_pending_q) begin
+                pending_clr_valid_o      <= 1'b1;
+                pending_clr_side_o       <= clz_internal_side_q;
+                pending_clr_price_o      <= 32'(WINDOW_BASE_TICK) + 32'(clz_s2_tick_q);
+                pending_clr_ingress_ts_o <= clz_internal_ingress_ts_q;
+                pending_clr_reason_o     <= clz_internal_reason_q;
+                pending_clr_sym_idx_o    <= clz_internal_sym_q;
+                if (clz_internal_side_q == 1'b0) begin
+                    best_bid_idx_q                       <= IDX_W'(clz_s2_tick_q);
+                    best_bid_tick_q[clz_internal_sym_q]  <= 32'(WINDOW_BASE_TICK) + 32'(clz_s2_tick_q);
+                    best_bid_size_q[clz_internal_sym_q]  <= '0;
+                    best_bid_valid_q[clz_internal_sym_q] <= 1'b1;
+                end else begin
+                    best_ask_idx_q                       <= IDX_W'(clz_s2_tick_q);
+                    best_ask_tick_q[clz_internal_sym_q]  <= 32'(WINDOW_BASE_TICK) + 32'(clz_s2_tick_q);
+                    best_ask_size_q[clz_internal_sym_q]  <= '0;
+                    best_ask_valid_q[clz_internal_sym_q] <= 1'b1;
+                end
+                clz_internal_pending_q <= 1'b0;
+            end
 
             if (set_bit_req) begin
+                begin : blk_set_hier
+                    logic [SLICE_W-1:0]              sl;
+                    logic [5:0]                      bit_in_sl;
+                    logic [SLICE_BITMAP_ADDR_W-1:0]  ram_addr;
+                    logic [63:0]                     old_slice, new_slice;
+                    bit_in_sl = op_idx_w[5:0];
+                    // When N_SLICES==1, SLICE_W is clamped to 1 but the only
+                    // valid sl value is 0. Mask to ensure no width pollution.
+                    sl        = SLICE_W'(op_idx_w >> 6);
+                    // Address = (sym_idx * 2 + side) * N_SLICES + sl
+                    ram_addr  = SLICE_BITMAP_ADDR_W'(op_sym_idx) * SLICE_BITMAP_ADDR_W'(2 * N_SLICES)
+                              + SLICE_BITMAP_ADDR_W'(op_side)    * SLICE_BITMAP_ADDR_W'(N_SLICES)
+                              + SLICE_BITMAP_ADDR_W'(sl);
+                    old_slice = slice_bitmap_ram[ram_addr];
+                    new_slice = old_slice | (64'd1 << bit_in_sl);
+                    slice_bitmap_ram[ram_addr]             <= new_slice;
+                    slice_present_q[op_sym_idx][op_side][sl] <= 1'b1;
+                end
                 if (op_side == 1'b0) begin
                     bid_bitmap_q[op_idx_w] <= 1'b1;
-                    if (!best_bid_valid_q || op_idx_w > best_bid_idx_q) begin
-                        best_bid_idx_q   <= op_idx_w;
-                        best_bid_size_q  <= op_size;
-                        best_bid_valid_q <= 1'b1;
+                    if (!best_bid_valid_q[op_sym_idx] || op_idx_w > best_bid_idx_q) begin
+                        best_bid_idx_q                <= op_idx_w;
+                        best_bid_tick_q[op_sym_idx]   <= op_price;
+                        best_bid_size_q[op_sym_idx]   <= op_size;
+                        best_bid_valid_q[op_sym_idx]  <= 1'b1;
                         delta_q.ingress_ts     <= ingress_ts;
                         delta_q.emit_ts        <= cur_ts;
                         delta_q.symbol_id      <= 16'(SYMBOL_FILTER_ID);
@@ -275,10 +420,11 @@ module tob_tracker
                     end
                 end else begin
                     ask_bitmap_q[op_idx_w] <= 1'b1;
-                    if (!best_ask_valid_q || op_idx_w < best_ask_idx_q) begin
-                        best_ask_idx_q   <= op_idx_w;
-                        best_ask_size_q  <= op_size;
-                        best_ask_valid_q <= 1'b1;
+                    if (!best_ask_valid_q[op_sym_idx] || op_idx_w < best_ask_idx_q) begin
+                        best_ask_idx_q                <= op_idx_w;
+                        best_ask_tick_q[op_sym_idx]   <= op_price;
+                        best_ask_size_q[op_sym_idx]   <= op_size;
+                        best_ask_valid_q[op_sym_idx]  <= 1'b1;
                         delta_q.ingress_ts     <= ingress_ts;
                         delta_q.emit_ts        <= cur_ts;
                         delta_q.symbol_id      <= 16'(SYMBOL_FILTER_ID);
@@ -290,31 +436,51 @@ module tob_tracker
                         m_tvalid_q             <= 1'b1;
                     end
                 end
-            end else if (clr_bit_req) begin
+            end else if (clr_bit_req) begin : blk_clr_branch
+                // M06 F.2 §6: per-sym hierarchical post-clr any-set check
+                // replaces the global `any_set(new_bm)` over bid/ask_bitmap_q.
+                // post_clr_sp mirrors slice_present_q[sym][side] with the
+                // current slice's bit reflecting `new_slice != 0` (the NBA
+                // write to slice_present_q lands at the next edge).
+                logic [SLICE_W-1:0]              sl;
+                logic [5:0]                      bit_in_sl;
+                logic [SLICE_BITMAP_ADDR_W-1:0]  ram_addr;
+                logic [63:0]                     old_slice, new_slice;
+                logic [N_SLICES-1:0]             post_clr_sp;
+                logic                            any_set_after_clr_per_sym;
+
+                bit_in_sl = op_idx_w[5:0];
+                sl        = SLICE_W'(op_idx_w >> 6);
+                ram_addr  = SLICE_BITMAP_ADDR_W'(op_sym_idx) * SLICE_BITMAP_ADDR_W'(2 * N_SLICES)
+                          + SLICE_BITMAP_ADDR_W'(op_side)    * SLICE_BITMAP_ADDR_W'(N_SLICES)
+                          + SLICE_BITMAP_ADDR_W'(sl);
+                old_slice = slice_bitmap_ram[ram_addr];
+                new_slice = old_slice & ~(64'd1 << bit_in_sl);
+                slice_bitmap_ram[ram_addr]               <= new_slice;
+                slice_present_q[op_sym_idx][op_side][sl] <= (new_slice != '0);
+
+                post_clr_sp     = slice_present_q[op_sym_idx][op_side];
+                post_clr_sp[sl] = (new_slice != 64'd0);
+                any_set_after_clr_per_sym = |post_clr_sp;
+
                 if (op_side == 1'b0) begin
-                    logic [WINDOW_SIZE_TICKS-1:0] new_bm;
-                    new_bm           = bid_bitmap_q;
-                    new_bm[op_idx_w] = 1'b0;
-                    bid_bitmap_q     <= new_bm;
+                    // bid_bitmap_q maintained for backwards-compat introspection
+                    // (Phase H integration TB may still inspect it). The
+                    // emit-decision now uses any_set_after_clr_per_sym, NOT
+                    // any_set(bid_bitmap_q).
+                    bid_bitmap_q[op_idx_w] <= 1'b0;
                     if (op_idx_w == best_bid_idx_q) begin
-                        if (any_set(new_bm)) begin
-                            logic [IDX_W-1:0] nb;
-                            nb = highest_set_bit(new_bm);
-                            best_bid_idx_q  <= nb;
-                            best_bid_size_q <= '0;
-                            // Defer the actual emit. lob_core will fetch
-                            // the new best's size via price_ladder and
-                            // drive update_size_req with the correct
-                            // value next-next cycle.
-                            pending_clr_valid_o      <= 1'b1;
-                            pending_clr_side_o       <= 1'b0;
-                            pending_clr_price_o      <= 32'(WINDOW_BASE_TICK) + 32'(nb);
-                            pending_clr_ingress_ts_o <= ingress_ts;
-                            pending_clr_reason_o     <= op_reason;
-                            // m_tvalid_q stays low here.
+                        if (any_set_after_clr_per_sym) begin
+                            clz_internal_kick_q       <= 1'b1;
+                            clz_internal_pending_q    <= 1'b1;
+                            clz_internal_sym_q        <= op_sym_idx;
+                            clz_internal_side_q       <= 1'b0;
+                            clz_internal_ingress_ts_q <= ingress_ts;
+                            clz_internal_reason_q     <= op_reason;
                         end else begin
-                            best_bid_valid_q       <= 1'b0;
-                            best_bid_size_q        <= '0;
+                            best_bid_valid_q[op_sym_idx]   <= 1'b0;
+                            best_bid_tick_q[op_sym_idx]    <= '0;
+                            best_bid_size_q[op_sym_idx]    <= '0;
                             delta_q.new_best_price <= '0;
                             delta_q.new_best_size  <= '0;
                             delta_q.ingress_ts     <= ingress_ts;
@@ -327,24 +493,19 @@ module tob_tracker
                         end
                     end
                 end else begin
-                    logic [WINDOW_SIZE_TICKS-1:0] new_bm;
-                    new_bm           = ask_bitmap_q;
-                    new_bm[op_idx_w] = 1'b0;
-                    ask_bitmap_q     <= new_bm;
+                    ask_bitmap_q[op_idx_w] <= 1'b0;
                     if (op_idx_w == best_ask_idx_q) begin
-                        if (any_set(new_bm)) begin
-                            logic [IDX_W-1:0] nb;
-                            nb = lowest_set_bit(new_bm);
-                            best_ask_idx_q  <= nb;
-                            best_ask_size_q <= '0;
-                            pending_clr_valid_o      <= 1'b1;
-                            pending_clr_side_o       <= 1'b1;
-                            pending_clr_price_o      <= 32'(WINDOW_BASE_TICK) + 32'(nb);
-                            pending_clr_ingress_ts_o <= ingress_ts;
-                            pending_clr_reason_o     <= op_reason;
+                        if (any_set_after_clr_per_sym) begin
+                            clz_internal_kick_q       <= 1'b1;
+                            clz_internal_pending_q    <= 1'b1;
+                            clz_internal_sym_q        <= op_sym_idx;
+                            clz_internal_side_q       <= 1'b1;
+                            clz_internal_ingress_ts_q <= ingress_ts;
+                            clz_internal_reason_q     <= op_reason;
                         end else begin
-                            best_ask_valid_q       <= 1'b0;
-                            best_ask_size_q        <= '0;
+                            best_ask_valid_q[op_sym_idx]   <= 1'b0;
+                            best_ask_tick_q[op_sym_idx]    <= '0;
+                            best_ask_size_q[op_sym_idx]    <= '0;
                             delta_q.new_best_price <= '0;
                             delta_q.new_best_size  <= '0;
                             delta_q.ingress_ts     <= ingress_ts;
@@ -361,9 +522,10 @@ module tob_tracker
                 // Size-only change at the current best (EXEC didn't
                 // zero out the level). Only emits if the price matches
                 // the current best — non-best size changes don't emit.
-                if (op_side == 1'b0 && best_bid_valid_q &&
+                if (op_side == 1'b0 && best_bid_valid_q[op_sym_idx] &&
                     op_price == 32'(WINDOW_BASE_TICK) + 32'(best_bid_idx_q)) begin
-                    best_bid_size_q        <= op_size;
+                    best_bid_tick_q[op_sym_idx]   <= op_price;
+                    best_bid_size_q[op_sym_idx]   <= op_size;
                     delta_q.ingress_ts     <= ingress_ts;
                     delta_q.emit_ts        <= cur_ts;
                     delta_q.symbol_id      <= 16'(SYMBOL_FILTER_ID);
@@ -373,9 +535,10 @@ module tob_tracker
                     delta_q.new_best_size  <= op_size;
                     delta_q.flags          <= '0;
                     m_tvalid_q             <= 1'b1;
-                end else if (op_side == 1'b1 && best_ask_valid_q &&
+                end else if (op_side == 1'b1 && best_ask_valid_q[op_sym_idx] &&
                              op_price == 32'(WINDOW_BASE_TICK) + 32'(best_ask_idx_q)) begin
-                    best_ask_size_q        <= op_size;
+                    best_ask_tick_q[op_sym_idx]   <= op_price;
+                    best_ask_size_q[op_sym_idx]   <= op_size;
                     delta_q.ingress_ts     <= ingress_ts;
                     delta_q.emit_ts        <= cur_ts;
                     delta_q.symbol_id      <= 16'(SYMBOL_FILTER_ID);
@@ -389,5 +552,126 @@ module tob_tracker
             end
         end
     end
+
+    // -----------------------------------------------------------------
+    // M06 D.2 — 2-stage 64×64 pipelined CLZ
+    // Stage 1: outer CLZ on slice_present_q[clz_kick_sym][clz_kick_side].
+    // Stage 2: inner CLZ on slice_bitmap_ram[winning slice].
+    // Latency: kick at cycle K → clz_result_valid at cycle K+2.
+    // -----------------------------------------------------------------
+
+    // Stage 1 registers
+    logic                       clz_s1_valid_q;
+    logic [SYM_IDX_W-1:0]       clz_s1_sym_q;
+    logic                       clz_s1_side_q;
+    logic [5:0]                 clz_s1_slice_idx_q;
+    logic                       clz_s1_any_q;
+
+    // Stage 1 combinational
+    logic [63:0]                clz_s1_present;
+    logic [63:0]                clz_s1_oriented;
+    logic [5:0]                 clz_s1_local;
+    logic                       clz_s1_any;
+
+    // D.3 — kick mux: the internal CLZ kick (from clr-empties-best) takes
+    // priority over the external TB kick. Both paths feed the same s1
+    // latch; the orchestrator must not interleave them (TB kicks are only
+    // used by tb_tob_tracker D.2 tests, which never drive set/clr/upd).
+    logic                       clz_kick_any;
+    logic [SYM_IDX_W-1:0]       clz_kick_sym_any;
+    logic                       clz_kick_side_any;
+    assign clz_kick_any      = clz_kick || clz_internal_kick_q;
+    assign clz_kick_sym_any  = clz_internal_kick_q ? clz_internal_sym_q  : clz_kick_sym;
+    assign clz_kick_side_any = clz_internal_kick_q ? clz_internal_side_q : clz_kick_side;
+
+    // Pad slice_present_q to 64 bits for the outer CLZ (N_SLICES may be < 64).
+    assign clz_s1_present  = 64'(slice_present_q[clz_kick_sym_any][clz_kick_side_any]);
+    assign clz_s1_oriented = (clz_kick_side_any == 1'b0) ? clz_s1_present
+                                                          : reverse64(clz_s1_present);
+    assign clz_s1_any      = |clz_s1_oriented;
+
+    always_comb begin
+        clz_s1_local = 6'd0;
+        for (int i = 63; i >= 0; i--) begin
+            if (clz_s1_oriented[i]) begin
+                clz_s1_local = 6'(i);
+                break;
+            end
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            clz_s1_valid_q     <= 1'b0;
+            clz_s1_sym_q       <= '0;
+            clz_s1_side_q      <= 1'b0;
+            clz_s1_slice_idx_q <= '0;
+            clz_s1_any_q       <= 1'b0;
+        end else begin
+            clz_s1_valid_q <= clz_kick_any;
+            if (clz_kick_any) begin
+                clz_s1_sym_q       <= clz_kick_sym_any;
+                clz_s1_side_q      <= clz_kick_side_any;
+                // For side=0: MSB of present vector is the winning slice.
+                // For side=1: oriented is reversed, so bit position in oriented
+                // maps to original slice (63 - clz_s1_local) in present.
+                clz_s1_slice_idx_q <= (clz_kick_side_any == 1'b0) ? clz_s1_local
+                                                                   : (6'd63 - clz_s1_local);
+                clz_s1_any_q       <= clz_s1_any;
+            end
+        end
+    end
+
+    // Stage 2 registers
+    logic                       clz_s2_valid_q;
+    logic [11:0]                clz_s2_tick_q;
+
+    // Stage 2 combinational
+    logic [63:0]                clz_s2_slice;
+    logic [63:0]                clz_s2_oriented;
+    logic [5:0]                 clz_s2_local;
+
+    logic [$clog2(N_SYMBOLS * 2 * N_SLICES)-1:0] clz_s2_ram_addr;
+    assign clz_s2_ram_addr = ($clog2(N_SYMBOLS * 2 * N_SLICES))'(clz_s1_sym_q)
+                              * ($clog2(N_SYMBOLS * 2 * N_SLICES))'(2 * N_SLICES)
+                           + ($clog2(N_SYMBOLS * 2 * N_SLICES))'(clz_s1_side_q)
+                              * ($clog2(N_SYMBOLS * 2 * N_SLICES))'(N_SLICES)
+                           + ($clog2(N_SYMBOLS * 2 * N_SLICES))'(clz_s1_slice_idx_q);
+
+    assign clz_s2_slice    = (clz_s1_valid_q && clz_s1_any_q)
+                             ? slice_bitmap_ram[clz_s2_ram_addr]
+                             : 64'd0;
+    assign clz_s2_oriented = (clz_s1_side_q == 1'b0) ? clz_s2_slice
+                                                      : reverse64(clz_s2_slice);
+
+    always_comb begin
+        clz_s2_local = 6'd0;
+        for (int i = 63; i >= 0; i--) begin
+            if (clz_s2_oriented[i]) begin
+                clz_s2_local = 6'(i);
+                break;
+            end
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (!rstn) begin
+            clz_s2_valid_q <= 1'b0;
+            clz_s2_tick_q  <= 12'd0;
+        end else begin
+            clz_s2_valid_q <= clz_s1_valid_q && clz_s1_any_q;
+            if (clz_s1_valid_q && clz_s1_any_q) begin : blk_clz_s2_tick
+                logic [5:0] bit_natural;
+                // For side=0: MSB position in slice is clz_s2_local.
+                // For side=1: oriented is reversed, so original bit = 63 - clz_s2_local.
+                bit_natural = (clz_s1_side_q == 1'b0) ? clz_s2_local : (6'd63 - clz_s2_local);
+                // Global tick = slice_idx * 64 + bit_in_slice
+                clz_s2_tick_q <= {clz_s1_slice_idx_q, bit_natural};
+            end
+        end
+    end
+
+    assign clz_result_valid = clz_s2_valid_q;
+    assign clz_result_tick  = clz_s2_tick_q;
 
 endmodule : tob_tracker

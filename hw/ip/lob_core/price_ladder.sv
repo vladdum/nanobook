@@ -37,6 +37,7 @@ module price_ladder
     /* verilator lint_off VARHIDDEN */
     parameter int unsigned WINDOW_BASE_TICK      = PKG_WINDOW_BASE_TICK,
     parameter int unsigned WINDOW_SIZE_TICKS     = PKG_WINDOW_SIZE_TICKS,
+    parameter int unsigned N_SYMBOLS             = lob_core_params_pkg::N_SYMBOLS,
     /* verilator lint_on VARHIDDEN */
     parameter int unsigned SLOT_IDX_W            = 24
 ) (
@@ -77,11 +78,27 @@ module price_ladder
     output logic                       level_evt_side,
     output logic [31:0]                level_evt_price,
     output logic [31:0]                level_evt_size,
+    // M06 F.2 §1: forward op_sym_idx alongside the other level_evt_*
+    // fields so the orchestrator (and ultimately tob_tracker) knows
+    // which sym the pulse refers to. Registered on the same cycle as
+    // level_evt_valid.
+    output logic [SYM_IDX_W-1:0]       level_evt_sym_idx,
+
+    // M06: symbol routing index. Defaults to '0 in the M05 single-symbol
+    // lob_core instantiation (Phase F will wire the real per-symbol value).
+    input  logic [SYM_IDX_W-1:0]       op_sym_idx,
+
+    // M06 F.2 §2: per-sym ladder origin. `addr_of` and `in_window` use this
+    // instead of the static WINDOW_BASE_TICK, so multi-symbol ops route to
+    // their own per-sym URAM slot and OOW detection follows the per-sym
+    // sliding window. Defaults to WINDOW_BASE_TICK when lob_core ties off
+    // (back-compat with the M05 single-symbol smoke / cycles TBs).
+    input  logic [31:0]                op_origin,
 
     output logic [31:0]                out_of_window
 );
     localparam int unsigned OFFS_W = $clog2(WINDOW_SIZE_TICKS);
-    localparam int unsigned ADDR_W = OFFS_W + 1;   // +1 MSB for side
+    localparam int unsigned ADDR_W = SYM_IDX_W + OFFS_W + 1;  // sym + side + offset
 
     typedef struct packed {
         logic [SLOT_IDX_W-1:0] head;
@@ -90,8 +107,14 @@ module price_ladder
         logic [15:0]           count;
     } level_t;
 
+    // NOTE: N_SYMBOLS * 2 * WINDOW_SIZE_TICKS * 96-b ≈ 100 Mbit at default
+    // sizes — Verilator simulation handles this fine, but Vivado OOC synth
+    // (Phase J) uses parameter overrides to reduce to spec-comparable smoke
+    // sizes. The M05 same workaround for HASH_SLOTS=4096 applies here.
+    /* verilator lint_off UNUSEDPARAM */
     (* ram_style = "ultra" *)
-    level_t levels [2 * WINDOW_SIZE_TICKS];
+    level_t levels [N_SYMBOLS * 2 * WINDOW_SIZE_TICKS];
+    /* verilator lint_on UNUSEDPARAM */
 
     logic [31:0] out_of_window_q;
     assign out_of_window = out_of_window_q;
@@ -102,16 +125,23 @@ module price_ladder
     logic [ADDR_W-1:0]  bypass_addr_q;
     level_t             bypass_data_q;
 
-    function automatic logic in_window(input logic [31:0] p);
-        return (p >= WINDOW_BASE_TICK) && (p < (WINDOW_BASE_TICK + WINDOW_SIZE_TICKS));
+    // F.2 §2: both helpers now derive the offset / bounds from the per-op
+    // origin (lob_core forwards pss_read_origin for ADD/read paths and
+    // d3_pl_q.read_origin for DEL — both threaded via the `op_origin`
+    // port). Single-symbol callers tie `op_origin = WINDOW_BASE_TICK` and
+    // recover the M05 behaviour.
+    function automatic logic in_window_with_origin(input logic [31:0] p,
+                                                    input logic [31:0] origin);
+        return (p >= origin) && (p < (origin + WINDOW_SIZE_TICKS));
     endfunction
 
-    function automatic logic [ADDR_W-1:0] addr_of(input logic side, input logic [31:0] p);
-        // Truncate-on-assign to OFFS_W bits — only the low bits of (p - BASE)
-        // matter once we've already gated on in_window().
+    function automatic logic [ADDR_W-1:0] addr_of(input logic [SYM_IDX_W-1:0] sym,
+                                                   input logic side,
+                                                   input logic [31:0] p,
+                                                   input logic [31:0] origin);
         logic [OFFS_W-1:0] offs;
-        offs = OFFS_W'(p - WINDOW_BASE_TICK);
-        return {side, offs};
+        offs = OFFS_W'(p - origin);
+        return {sym, side, offs};
     endfunction
 
     function automatic level_t read_level(input logic [ADDR_W-1:0] a);
@@ -133,6 +163,7 @@ module price_ladder
             level_evt_side   <= 1'b0;
             level_evt_price  <= '0;
             level_evt_size   <= '0;
+            level_evt_sym_idx <= '0;
             level_now_empty  <= 1'b0;
             level_now_active <= 1'b0;
             read_head        <= '0;
@@ -140,7 +171,7 @@ module price_ladder
             read_agg_size    <= '0;
             read_count       <= '0;
             add_old_tail     <= '0;
-            for (int i = 0; i < 2 * WINDOW_SIZE_TICKS; i++) begin
+            for (int i = 0; i < N_SYMBOLS * 2 * WINDOW_SIZE_TICKS; i++) begin
                 levels[i].head     <= '0;
                 levels[i].tail     <= '0;
                 levels[i].agg_size <= '0;
@@ -158,11 +189,11 @@ module price_ladder
                 level_t            cur;
                 level_t            nxt;
 
-                if (!in_window(op_price)) begin
+                if (!in_window_with_origin(op_price, op_origin)) begin
                     out_of_window_q <= out_of_window_q + 1'b1;
                     bypass_valid_q  <= 1'b0;
                 end else begin
-                    a   = addr_of(op_side, op_price);
+                    a   = addr_of(op_sym_idx, op_side, op_price, op_origin);
                     cur = read_level(a);
 
                     nxt.tail     = op_slot;
@@ -181,10 +212,11 @@ module price_ladder
                     // changes on already-active levels (tob_tracker filters
                     // internally to "is this the current best price?").
                     // level_now_active is still strictly the 0->1 transition.
-                    level_evt_valid <= 1'b1;
-                    level_evt_side  <= op_side;
-                    level_evt_price <= op_price;
-                    level_evt_size  <= nxt.agg_size;
+                    level_evt_valid   <= 1'b1;
+                    level_evt_side    <= op_side;
+                    level_evt_price   <= op_price;
+                    level_evt_size    <= nxt.agg_size;
+                    level_evt_sym_idx <= op_sym_idx;
                     if (cur.count == 16'd0) begin
                         level_now_active <= 1'b1;
                     end
@@ -194,11 +226,11 @@ module price_ladder
                 level_t            cur;
                 level_t            nxt;
 
-                if (!in_window(op_price)) begin
+                if (!in_window_with_origin(op_price, op_origin)) begin
                     out_of_window_q <= out_of_window_q + 1'b1;
                     bypass_valid_q  <= 1'b0;
                 end else begin
-                    a   = addr_of(op_side, op_price);
+                    a   = addr_of(op_sym_idx, op_side, op_price, op_origin);
                     cur = read_level(a);
 
                     nxt          = cur;
@@ -218,10 +250,11 @@ module price_ladder
 
                     // level_evt_* fires on EVERY in-window committed del
                     // (full or partial), not just on empty transitions.
-                    level_evt_valid <= 1'b1;
-                    level_evt_side  <= op_side;
-                    level_evt_price <= op_price;
-                    level_evt_size  <= nxt.agg_size;   // = 0 for emptied
+                    level_evt_valid   <= 1'b1;
+                    level_evt_side    <= op_side;
+                    level_evt_price   <= op_price;
+                    level_evt_size    <= nxt.agg_size;   // = 0 for emptied
+                    level_evt_sym_idx <= op_sym_idx;
                     if (!op_partial && (nxt.count == 16'd0)) begin
                         level_now_empty <= 1'b1;
                     end
@@ -235,7 +268,7 @@ module price_ladder
             if (read_req) begin : read_path
                 logic [ADDR_W-1:0] a;
                 level_t            cur;
-                a   = addr_of(op_side, op_price);
+                a   = addr_of(op_sym_idx, op_side, op_price, op_origin);
                 cur = read_level(a);
                 read_head     <= cur.head;
                 read_tail     <= cur.tail;
@@ -253,6 +286,10 @@ module price_ladder
     // ------------------------------------------------------------------
     logic _unused_pkg;
     assign _unused_pkg = |{
+        // F.2 §2: WINDOW_BASE_TICK (module-local) is now unused — addr_of
+        // and in_window_with_origin both consume op_origin. Touch it
+        // here to keep -Wall happy.
+        WINDOW_BASE_TICK[0],
         PKG_WINDOW_BASE_TICK[0],
         PKG_WINDOW_SIZE_TICKS[0],
         PKG_SYMBOL_FILTER_ID[0],

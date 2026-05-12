@@ -6,12 +6,15 @@ Exercises:
   - record write / read round-trip
   - dual read ports return correct records on the same cycle
   - cycle counts: alloc = 1, read = 1, write = 1
+  - M06 pool record format: sym_idx + ins_epoch round-trip
 """
 from __future__ import annotations
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
+
+from _book import pack_pool_record_m06, unpack_pool_record_m06
 
 
 async def _reset(dut, cycles=4):
@@ -123,3 +126,29 @@ async def test_pool_exhaustion_bumps_counter(dut):
     await RisingEdge(dut.clk)
     assert int(dut.alloc_valid.value) == 0
     assert int(dut.pool_exhausted.value) >= 1
+
+
+@cocotb.test()
+async def test_m06_record_packs_sym_idx_and_epoch(dut):
+    """M06: pack_pool_record_m06 serialises sym_idx + ins_epoch into the
+    opaque 256-bit record; the pool stores+retrieves it bit-exact; the
+    unpack helper recovers all fields."""
+    cocotb.start_soon(Clock(dut.clk, 4, unit="ns").start())
+    await _reset(dut)
+    rec = pack_pool_record_m06(
+        order_id=0xDEADBEEFCAFEBABE, side=1, price=100, shares=42,
+        prev=0xABCDEF, next=0x123456, sym_idx=99, ins_epoch=0xFFFE,
+    )
+    s = await _alloc(dut)
+    await _write(dut, s, rec)
+    got = await _read0(dut, s)
+    assert got == rec, f"\n  exp {rec:064x}\n  got {got:064x}"
+    fields = unpack_pool_record_m06(got)
+    assert fields["order_id"] == 0xDEADBEEFCAFEBABE
+    assert fields["side"] == 1
+    assert fields["price"] == 100
+    assert fields["shares"] == 42
+    assert fields["prev"] == 0xABCDEF
+    assert fields["next"] == 0x123456
+    assert fields["sym_idx"] == 99
+    assert fields["ins_epoch"] == 0xFFFE
