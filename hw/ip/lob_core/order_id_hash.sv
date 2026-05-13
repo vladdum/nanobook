@@ -8,8 +8,11 @@
 // Plan: docs/superpowers/plans/2026-05-09-nanobook-m05-book-core-uram.md Task 16.
 //
 // Behaviour:
-//   - HASH_SLOTS rows of {valid, tombstone, _pad, order_id (64), slot_idx (24)}
-//     packed to 128-bit URAM row (2 URAMs wide).
+//   - HASH_SLOTS rows. Validity bits (valid, tombstone) live in FFs and
+//     clear in a single cycle on reset; the (order_id, slot_idx) payload
+//     (88 b) lives in URAM. URAM cells have no reset port, so splitting
+//     the storage is what lets the table be cleared on reset while the
+//     payload still lands in URAM.
 //   - Linear probing up to MAX_PROBE_DEPTH probes.
 //   - hash_probe_max saturates to the deepest probe ever observed.
 //   - hash_overflow increments when an insert/lookup exceeds MAX_PROBE_DEPTH.
@@ -123,7 +126,10 @@ module order_id_hash
     localparam int unsigned BUCKET_W = $clog2(HASH_SLOTS);
     localparam int unsigned PROBE_CW = $clog2(MAX_PROBE_DEPTH + 1);
 
-    // Row layout: {valid, tombstone, _pad (38), order_id (64), slot_idx (24)} = 128 b.
+    // Row layout for the FSM-side read registers (row_first_q / row_probe_q):
+    // valid + tombstone + order_id + slot_idx. The actual storage is split
+    // across two backing pools (see below); `row_t` is just a convenient
+    // bundle for the registers that hold a captured row mid-pipeline.
     typedef struct packed {
         logic                       valid;
         logic                       tombstone;
@@ -132,8 +138,57 @@ module order_id_hash
         logic [SLOT_IDX_W-1:0]      slot_idx;
     } row_t;
 
-    (* ram_style = "ultra" *)
-    row_t table_ram [HASH_SLOTS];
+    // Storage split: validity bits live in FFs, payload lives in URAM.
+    //
+    // Vivado URAM cells have no reset port and cannot be cleared in a single
+    // cycle. A whole-array synchronous reset loop therefore blocks URAM
+    // inference (the earlier struct-array attempt also failed because Vivado
+    // decomposed `row_t table_ram [...]` per field — see Synth 8-7186 in the
+    // 2026-05-13 OOC log). Keeping the validity bits in flops costs only
+    // 2 × HASH_SLOTS FFs and lets the design clear all "occupied" markers
+    // in one cycle on reset, while the order_id+slot_idx payload lives in
+    // URAM with no reset (URAM contents are don't-care for tombstoned /
+    // never-written slots because `valid` gates every consumer).
+    //
+    // Pattern matches order_pool.sv (flat bit-vector array, no reset, single
+    // sync read latched into a register), which is the only thing that
+    // inferred URAM in the previous synth run.
+    typedef struct packed {
+        logic [63:0]                order_id;
+        logic [SLOT_IDX_W-1:0]      slot_idx;
+    } payload_t;
+
+    localparam int unsigned PAYLOAD_W = $bits(payload_t);
+
+    logic [HASH_SLOTS-1:0]  table_valid_q;
+    logic [HASH_SLOTS-1:0]  table_tombstone_q;
+
+    // Payload storage — routed through the uram_sdp wrapper so Vivado
+    // sees the canonical single-flat-reg-LHS sync read pattern that it
+    // folds into a URAM cell. Earlier the inline read was a concatenation-
+    // LHS NBA (`{row_first_q.order_id, row_first_q.slot_idx} <=
+    // table_ram_payload[idx]`), which Vivado decomposed into per-field
+    // arrays and silently dropped to LUT distRAM (1664 RAM64M8 primitives
+    // on the 2026-05-13 21:55 synth). With the wrapper, table_ram_payload
+    // lives inside `u_hash_payload/mem` and is inferred as URAM cleanly.
+    logic                   hash_mem_we_w;
+    logic [BUCKET_W-1:0]    hash_mem_waddr_w;
+    logic [PAYLOAD_W-1:0]   hash_mem_wdata_w;
+    logic [BUCKET_W-1:0]    hash_mem_raddr_w;
+    logic [PAYLOAD_W-1:0]   hash_mem_rdata_w;
+
+    uram_sdp #(
+        .WIDTH (PAYLOAD_W),
+        .DEPTH (HASH_SLOTS)
+    ) u_hash_payload (
+        .clk   (clk),
+        .we    (hash_mem_we_w),
+        .waddr (hash_mem_waddr_w),
+        .wdata (hash_mem_wdata_w),
+        .re    (1'b1),
+        .raddr (hash_mem_raddr_w),
+        .rdata (hash_mem_rdata_w)
+    );
 
     // ------------------------------------------------------------------
     // Hash function — Phase B pinned HASH_XORSHIFT64.
@@ -238,17 +293,52 @@ module order_id_hash
     always_comb first_h   = hash64(order_id);
     always_comb first_idx = first_h[BUCKET_W-1:0];
 
-    // Registered payload reads (post 2026-05-13 amendment). The URAM
-    // address comes from already-registered first_idx_q / probe_idx, and
-    // the payload is latched into row_first_q / row_probe_q in
-    // ST_FIRST_READ / ST_PROBE_READ. Vivado therefore infers UltraRAM
-    // with both the address and data ports registered, satisfying the
-    // ram_style="ultra" hint. The _pad bits of the struct are stored but
-    // never decoded — UNUSEDSIGNAL is fine.
+    // Row views — valid/tombstone are FF-backed (single-cycle reset on
+    // rstn), order_id/slot_idx come combinationally from the uram_sdp
+    // wrapper's registered rdata. The raddr mux below ensures rdata holds
+    // mem[first_idx_q] during ST_FIRST and mem[probe_idx] during ST_PROBE.
+    logic row_first_valid_q,  row_first_tombstone_q;
+    logic row_probe_valid_q,  row_probe_tombstone_q;
     /* verilator lint_off UNUSEDSIGNAL */
     row_t row_first_q;
     row_t row_probe_q;
     /* verilator lint_on UNUSEDSIGNAL */
+    always_comb begin
+        row_first_q          = '0;
+        row_first_q.valid    = row_first_valid_q;
+        row_first_q.tombstone= row_first_tombstone_q;
+        {row_first_q.order_id, row_first_q.slot_idx} = hash_mem_rdata_w;
+
+        row_probe_q          = '0;
+        row_probe_q.valid    = row_probe_valid_q;
+        row_probe_q.tombstone= row_probe_tombstone_q;
+        {row_probe_q.order_id, row_probe_q.slot_idx} = hash_mem_rdata_w;
+    end
+
+    // Wrapper raddr/we drivers. raddr is muxed by state so that rdata
+    // carries the right bucket's payload one cycle later:
+    //   - ST_FIRST_READ at cycle T : raddr=first_idx_q → rdata @T+1 = mem[first_idx_q]
+    //   - ST_PROBE_READ at cycle T : raddr=probe_idx   → rdata @T+1 = mem[probe_idx]
+    // we / waddr / wdata fire in ST_FIRST and ST_PROBE when an insert
+    // commits at the current bucket.
+    assign hash_mem_raddr_w = (state == ST_PROBE_READ || state == ST_PROBE)
+                              ? probe_idx : first_idx_q;
+    always_comb begin
+        hash_mem_we_w    = 1'b0;
+        hash_mem_waddr_w = first_idx_q;
+        hash_mem_wdata_w = '0;
+        if (state == ST_FIRST && is_insert
+            && (!row_first_q.valid || row_first_q.tombstone)) begin
+            hash_mem_we_w    = 1'b1;
+            hash_mem_waddr_w = first_idx_q;
+            hash_mem_wdata_w = PAYLOAD_W'({saved_oid, saved_slot});
+        end else if (state == ST_PROBE && is_insert
+                     && (!row_probe_q.valid || row_probe_q.tombstone)) begin
+            hash_mem_we_w    = 1'b1;
+            hash_mem_waddr_w = probe_idx;
+            hash_mem_wdata_w = PAYLOAD_W'({saved_oid, saved_slot});
+        end
+    end
 
     // probe_depth + 1, sized to 8 b for comparison with stat & MAX_PROBE_DEPTH.
     logic [7:0] probe_depth_p1;
@@ -272,15 +362,17 @@ module order_id_hash
             slot_idx_out_q    <= '0;
             last_done_q       <= 1'b0;
             last_oid_q        <= '0;
-            row_first_q       <= '0;
-            row_probe_q       <= '0;
-            for (int i = 0; i < HASH_SLOTS; i++) begin
-                table_ram[i].valid     <= 1'b0;
-                table_ram[i].tombstone <= 1'b0;
-                table_ram[i]._pad      <= '0;
-                table_ram[i].order_id  <= '0;
-                table_ram[i].slot_idx  <= '0;
-            end
+            row_first_valid_q     <= 1'b0;
+            row_first_tombstone_q <= 1'b0;
+            row_probe_valid_q     <= 1'b0;
+            row_probe_tombstone_q <= 1'b0;
+            // Validity bits clear in a single cycle (FF storage); the URAM
+            // payload is not reset (URAM cells have no reset port) and is
+            // gated by the validity bits at every read.
+            /* verilator lint_off WIDTHCONCAT */
+            table_valid_q     <= '0;
+            table_tombstone_q <= '0;
+            /* verilator lint_on WIDTHCONCAT */
         end else begin
             op_done     <= 1'b0;
             op_ok       <= 1'b0;
@@ -302,15 +394,14 @@ module order_id_hash
                 end
 
                 ST_FIRST_READ: begin
-                    // Register the URAM payload using the already-registered
-                    // first_idx_q. The NBA-ordering bug that the 2026-05-11
-                    // amendment file note flagged is avoided because
-                    // first_idx_q was registered one cycle ago (in ST_IDLE),
-                    // so by ST_FIRST_READ it already holds the post-NBA
-                    // value. table_ram[first_idx_q] is therefore the correct
-                    // bucket.
-                    row_first_q <= table_ram[first_idx_q];
-                    state       <= ST_FIRST;
+                    // Capture validity bits this cycle. The URAM payload
+                    // read is performed by the uram_sdp wrapper at this
+                    // same edge (raddr = first_idx_q via the state mux
+                    // above), so hash_mem_rdata_w holds mem[first_idx_q]
+                    // by the time we transition into ST_FIRST.
+                    row_first_valid_q     <= table_valid_q[first_idx_q];
+                    row_first_tombstone_q <= table_tombstone_q[first_idx_q];
+                    state                 <= ST_FIRST;
                 end
 
                 ST_FIRST: begin
@@ -338,10 +429,10 @@ module order_id_hash
                         end
                     end else if (is_insert) begin
                         if (!row_first_q.valid || row_first_q.tombstone) begin
-                            table_ram[first_idx_q].valid     <= 1'b1;
-                            table_ram[first_idx_q].tombstone <= 1'b0;
-                            table_ram[first_idx_q].order_id  <= saved_oid;
-                            table_ram[first_idx_q].slot_idx  <= saved_slot;
+                            // URAM payload write fires combinationally
+                            // via the wrapper drivers (hash_mem_we_w=1).
+                            table_valid_q[first_idx_q]      <= 1'b1;
+                            table_tombstone_q[first_idx_q]  <= 1'b0;
                             op_done     <= 1'b1;
                             op_ok       <= 1'b1;
                             last_done_q <= 1'b1;
@@ -354,8 +445,10 @@ module order_id_hash
                         end
                     end else /* is_delete */ begin
                         if (row_first_q.valid && row_first_q.order_id == saved_oid) begin
-                            table_ram[first_idx_q].valid     <= 1'b0;
-                            table_ram[first_idx_q].tombstone <= 1'b1;
+                            // Tombstone the slot. Payload is don't-care once
+                            // valid=0; no URAM write needed on the delete path.
+                            table_valid_q[first_idx_q]     <= 1'b0;
+                            table_tombstone_q[first_idx_q] <= 1'b1;
                             op_done     <= 1'b1;
                             op_ok       <= 1'b1;
                             last_done_q <= 1'b1;
@@ -376,13 +469,13 @@ module order_id_hash
                 end
 
                 ST_PROBE_READ: begin
-                    // Same registered-payload pattern as ST_FIRST_READ:
-                    // probe_idx was registered in the previous cycle (either
-                    // from ST_FIRST's collide branch or from ST_PROBE's
-                    // collide branch), so reading table_ram[probe_idx] here
-                    // gives the correct probe bucket.
-                    row_probe_q <= table_ram[probe_idx];
-                    state       <= ST_PROBE;
+                    // Capture validity bits for the probe bucket; the
+                    // wrapper handles the URAM read at this same edge
+                    // (raddr=probe_idx via the state mux) so rdata is
+                    // valid when we land in ST_PROBE.
+                    row_probe_valid_q     <= table_valid_q[probe_idx];
+                    row_probe_tombstone_q <= table_tombstone_q[probe_idx];
+                    state                 <= ST_PROBE;
                 end
 
                 ST_PROBE: begin
@@ -420,10 +513,10 @@ module order_id_hash
                         end
                     end else if (is_insert) begin
                         if (!row_probe_q.valid || row_probe_q.tombstone) begin
-                            table_ram[probe_idx].valid     <= 1'b1;
-                            table_ram[probe_idx].tombstone <= 1'b0;
-                            table_ram[probe_idx].order_id  <= saved_oid;
-                            table_ram[probe_idx].slot_idx  <= saved_slot;
+                            // URAM payload write fires combinationally
+                            // via the wrapper drivers (hash_mem_we_w=1).
+                            table_valid_q[probe_idx]      <= 1'b1;
+                            table_tombstone_q[probe_idx]  <= 1'b0;
                             op_done     <= 1'b1;
                             op_ok       <= 1'b1;
                             last_done_q <= 1'b1;
@@ -443,8 +536,9 @@ module order_id_hash
                         end
                     end else if (is_delete) begin
                         if (row_probe_q.valid && row_probe_q.order_id == saved_oid) begin
-                            table_ram[probe_idx].valid     <= 1'b0;
-                            table_ram[probe_idx].tombstone <= 1'b1;
+                            // Tombstone the probe slot. Payload is don't-care.
+                            table_valid_q[probe_idx]     <= 1'b0;
+                            table_tombstone_q[probe_idx] <= 1'b1;
                             op_done     <= 1'b1;
                             op_ok       <= 1'b1;
                             last_done_q <= 1'b1;

@@ -21,15 +21,15 @@ create_project -in_memory -part xcu50-fsvh2104-2-e
 # `\`includes` book_event_pkg.sv. Pass -include_dirs to set_property
 # AFTER read_verilog so it applies to elaboration.
 read_verilog -sv "$ITCH_DIR/book_event_pkg.sv"
-read_verilog -sv "$LOB_DIR/lob_core_params_pkg.sv"
-read_verilog -sv "$LOB_DIR/lob_core_sym_pkg.sv"
-read_verilog -sv "$LOB_DIR/sym_idx_lut.sv"
-read_verilog -sv "$LOB_DIR/per_sym_state.sv"
-read_verilog -sv "$LOB_DIR/order_pool.sv"
-read_verilog -sv "$LOB_DIR/order_id_hash.sv"
-read_verilog -sv "$LOB_DIR/price_ladder.sv"
-read_verilog -sv "$LOB_DIR/tob_tracker.sv"
-read_verilog -sv "$LOB_DIR/lob_core.sv"
+# Source list pulled from the canonical lob_core filelist so synth, lint,
+# and the cocotb integration TBs all see the same order.
+set fp [open "$LOB_DIR/files.f" r]
+while {[gets $fp line] >= 0} {
+    set t [string trim $line]
+    if {$t eq "" || [string index $t 0] eq "#"} continue
+    read_verilog -sv "$LOB_DIR/$t"
+}
+close $fp
 set_property include_dirs [list "$ITCH_DIR" "$LOB_DIR"] [current_fileset]
 
 read_xdc "$REPO_ROOT/hw/synth/lob_core/timing.xdc"

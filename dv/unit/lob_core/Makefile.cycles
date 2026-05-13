@@ -10,19 +10,14 @@ MODULE    := tb_lob_core_cycles
 # 100 events fit the window.
 SIM_BUILD := sim_build_lob_core_cycles
 
-# Source order: book_event_pkg → lob_core_params_pkg → sub-modules → top.
-# All sub-modules must precede lob_core.sv (the top instantiates them).
+# Source list comes from the canonical lob_core filelist so this TB,
+# synth, lint, and the integration cosims stay in lock-step. book_event_pkg
+# is pulled in explicitly because it's the itch_decoder boundary type.
+LOB_DIR        := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core)
+LOB_SOURCES    := $(addprefix $(LOB_DIR)/,$(shell grep -vE '^[[:space:]]*(\#|$$)' $(LOB_DIR)/files.f))
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_sym_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/sym_idx_lut.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/per_sym_state.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
+    $(LOB_SOURCES)
 
 # Tiny sim-only sizing — keeps Verilator build + cocotb runtime tractable.
 # Three sizings deviate from the plan-suggested values; the deviations are

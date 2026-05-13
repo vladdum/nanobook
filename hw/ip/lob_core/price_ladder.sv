@@ -7,35 +7,44 @@
 //
 // One row per (side, tick_offset) holds the price-level head/tail slot
 // pointers, aggregate size, and order count. A 1-deep bypass register
-// forwards a previous-cycle writeback onto a same-address read; an
-// in-flight forwarding mux covers the back-to-back-on-same-address hazard
-// where stage 1 commits a write the very cycle stage 0 issues a read on
-// that address. Both paths together satisfy spec §3.2's correctness
-// requirement under the post-2026-05-13 2-stage pipeline.
+// forwards a previous-cycle writeback onto a same-address read; the
+// bypass mux sits DOWNSTREAM of the URAM output register (see
+// `s1_cur_eff` below) so the URAM cell is inferred cleanly. This
+// satisfies spec §3.2's correctness requirement under the 2-stage
+// pipeline.
 //
 // 2026-05-13 amendment — registered URAM read:
 //   Pre-amendment the level URAM was read combinationally inside an
 //   always_ff (read_level() called in the same cycle as the writeback).
-//   Vivado therefore could not infer URAM/BRAM and the `levels` array
-//   fell back to flip-flops (393K FFs at the smoke config @ N_SYMBOLS=4
-//   — three orders of magnitude too many at production sizing). The
-//   M06 Phase J OOC synth attempt was killed by that synthesis cost.
+//   Vivado could not infer URAM/BRAM and the `levels` array fell back
+//   to flip-flops (393K FFs at the smoke config @ N_SYMBOLS=4 — three
+//   orders of magnitude too many at production sizing).
 //
-//   The amended module pipelines into two stages so the URAM read is a
-//   true synchronous URAM read:
+//   The amended module pipelines into two stages:
 //     - Stage 0 (input cycle): compute `a_d = addr_of(...)` and
 //       `in_win_d = in_window_with_origin(...)` combinationally. Latch
-//       op metadata into s1_*_q registers and issue the URAM read
-//       (s1_cur_q <= read_level_d(a_d)). read_level_d combinationally
-//       muxes between the URAM array, the bypass register (1-cycle-old
-//       write), and the in-flight forward (write committing this cycle
-//       from stage 1).
-//     - Stage 1 (commit cycle): use s1_*_q to compute `nxt`, write
-//       levels[s1_addr_q] <= nxt, update the bypass register, and emit
-//       the level_evt_* pulse + the read_head/tail/agg_size/count
-//       registers.
+//       op metadata into s1_*_q registers and issue a pure URAM
+//       sync-read (`s1_cur_q <= levels[a_d]` — no muxes upstream of
+//       this NBA, which is the key to URAM inference).
+//     - Stage 1 (commit cycle): apply bypass forwarding combinationally
+//       (s1_cur_eff = bypass_match ? bypass_data_q : s1_cur_q), use
+//       s1_cur_eff + s1_*_q to compute `nxt`, write levels[s1_addr_q]
+//       <= nxt, update the bypass register, and emit the level_evt_*
+//       pulse + the read_head/tail/agg_size/count registers.
 //
-//   Latency consequence (spec §6): ADD, DEL, and read each +1 cycle.
+//   2026-05-13 follow-up — downstream forwarding:
+//     The original amendment kept the forwarding mux UPSTREAM of the
+//     URAM output register (read_level_d() called inside the NBA),
+//     which still failed URAM inference (silent fallback to a 282K-LUT
+//     MUXF7/F8 tree, owning the WNS path at -0.108 ns). This revision
+//     moves the bypass mux downstream into stage 1 (s1_cur_eff) and
+//     drops the in-flight forwarding entirely: pure URAM read in stage 0
+//     returns the pre-write value, and at the next cycle bypass_q
+//     already holds the committed write — bypass alone covers every
+//     back-to-back same-address case.
+//
+//   Latency consequence (spec §6): ADD, DEL, and read each +1 cycle
+//   versus the pre-amendment single-cycle path.
 //
 // Bound check: ops outside [op_origin, op_origin + WINDOW_SIZE_TICKS)
 // are silently refused and bump the `out_of_window` saturating counter.
@@ -135,16 +144,50 @@ module price_ladder
         logic [15:0]           count;
     } level_t;
 
-    // NOTE: N_SYMBOLS * 2 * WINDOW_SIZE_TICKS * 96-b ≈ 100 Mbit at default
-    // sizes — Verilator simulation handles this fine, but Vivado OOC synth
-    // (Phase J) uses parameter overrides to reduce to spec-comparable smoke
-    // sizes. Post 2026-05-13 amendment, the URAM read is registered into
-    // s1_cur_q via the pipeline below, so Vivado infers UltraRAM
-    // (ram_style="ultra") cleanly.
-    /* verilator lint_off UNUSEDPARAM */
-    (* ram_style = "ultra" *)
-    level_t levels [N_SYMBOLS * 2 * WINDOW_SIZE_TICKS];
-    /* verilator lint_on UNUSEDPARAM */
+    localparam int unsigned LEVEL_W  = $bits(level_t);
+    localparam int unsigned N_LEVELS = N_SYMBOLS * 2 * WINDOW_SIZE_TICKS;
+
+    // Levels storage — instantiated via the uram_sdp wrapper instead of an
+    // inline `level_t levels[]` array. The earlier (committed) form declared
+    // the array as a packed-struct, which Vivado decomposed PER FIELD
+    // (`levels[i][head]`, `levels[i][tail]`, etc.) — Synth 8-7186 fired 100+
+    // times in the 2026-05-13 OOC synth and `ram_style="ultra"` was silently
+    // ignored, falling back to 393 K flip-flops. uram_sdp keeps storage as
+    // a single flat WIDTH-bit array (the order_pool.records_reg shape) so
+    // Vivado folds it into a real URAM cell. Pack/unpack of `level_t`
+    // happens at the wrapper boundary below.
+    logic               mem_we_w;
+    logic [LEVEL_W-1:0] mem_wdata_w;
+    logic [LEVEL_W-1:0] mem_rdata_w;     // 1-cycle-registered read output
+
+    uram_sdp #(
+        .WIDTH (LEVEL_W),
+        .DEPTH (N_LEVELS)
+    ) u_levels (
+        .clk   (clk),
+        .we    (mem_we_w),
+        .waddr (s1_addr_q),
+        .wdata (mem_wdata_w),
+        .re    (1'b1),
+        .raddr (a_d),
+        .rdata (mem_rdata_w)
+    );
+
+    // Per-level "active" bits — FF-backed flat bit-vector, resets to 0 in
+    // a single cycle on rstn=0. URAM cells have no reset port, so the
+    // payload mem[] retains its contents across rstn; the active flag is
+    // the authoritative source of "this level is non-empty" and gates the
+    // URAM read result during stage-1 nxt computation (an inactive level
+    // is treated as cur.count=0 regardless of stale URAM contents). The
+    // flag is set when count transitions 0→N and cleared when count
+    // returns to 0.
+    //
+    // Storage at smoke sizing (N_SYMBOLS=4, WINDOW_SIZE_TICKS=512):
+    // 4096 FFs. Production sizing pushes this toward 1 M FFs; revisiting
+    // it (move to URAM with an explicit clearing FSM, or per-symbol
+    // packed bitmaps) is Phase K work.
+    logic [N_LEVELS-1:0] level_active_q;
+    logic                s1_cur_active_q;
 
     logic [31:0] out_of_window_q;
     assign out_of_window = out_of_window_q;
@@ -178,7 +221,9 @@ module price_ladder
     endfunction
 
     // ----------------------------------------------------------------------
-    // Stage-1 pipeline registers — capture op metadata + the URAM read.
+    // Stage-1 pipeline registers — capture op metadata. The URAM read
+    // result is supplied by the uram_sdp wrapper's registered rdata; no
+    // separate s1_cur_q register is needed (the wrapper IS the register).
     // ----------------------------------------------------------------------
     logic                       s1_add_q, s1_del_q, s1_read_q;
     logic                       s1_side_q, s1_partial_q;
@@ -187,7 +232,6 @@ module price_ladder
     logic [SYM_IDX_W-1:0]       s1_sym_idx_q;
     logic [ADDR_W-1:0]          s1_addr_q;
     logic                       s1_in_window_q;
-    level_t                     s1_cur_q;
 
     // Combinational stage-0 helpers.
     logic [ADDR_W-1:0]          a_d;
@@ -197,50 +241,71 @@ module price_ladder
         in_win_d = in_window_with_origin(op_price, op_origin);
     end
 
-    // Combinational stage-1 nxt + write-enable. These feed both the actual
-    // writeback (registered) and the in-flight forwarding mux (so a
-    // back-to-back ADD/ADD or ADD/DEL on the same address resolves
-    // correctly even though the bypass register isn't updated until the
-    // NBA at the end of this cycle).
-    level_t s1_nxt_d;
-    logic   s1_writing_d;
+    // URAM read view as a level_t. The wrapper returns a flat WIDTH-bit
+    // vector; we cast back to the struct here. The result is gated by
+    // s1_cur_active_q: an inactive level reads as all-zeros (cur.count=0)
+    // regardless of whatever stale data the URAM cell holds. Together with
+    // the FF-backed level_active_q this gives clean post-reset behaviour
+    // without needing a per-cell URAM clear loop (which is what blocked
+    // URAM inference pre-fix).
+    level_t s1_cur_w;
     always_comb begin
-        s1_nxt_d     = '0;
-        s1_writing_d = 1'b0;
+        if (s1_cur_active_q) begin
+            s1_cur_w = level_t'(mem_rdata_w);
+        end else begin
+            s1_cur_w = '0;
+        end
+    end
+
+    // Stage-1 bypass forwarding mux. s1_cur_w carries the unbypassed URAM
+    // read (registered inside uram_sdp); s1_cur_eff applies the 1-cycle-
+    // stale bypass register on top, so the nxt compute / commit / read-path
+    // logic below see the freshest committed value.
+    //
+    // Why bypass alone is sufficient (no in-flight forward needed):
+    //   - Pure URAM read in stage 0 returns the levels[] value as of the
+    //     start of that cycle (BRAM/URAM read-before-write semantics).
+    //   - The only hazard is back-to-back same-address ops: op-A in
+    //     stage 1 commits at NBA of cycle N, op-B in stage 0 reads
+    //     levels[addr] at cycle N and gets the pre-NBA (stale) value.
+    //   - At cycle N+1 op-B is in stage 1; bypass_valid_q=1 and
+    //     bypass_addr_q matches → forward. For ops spaced 2+ cycles
+    //     apart, levels[] is already up to date and the bypass mux
+    //     selects s1_cur_w.
+    level_t s1_cur_eff;
+    always_comb begin
+        if (bypass_valid_q && (bypass_addr_q == s1_addr_q)) begin
+            s1_cur_eff = bypass_data_q;
+        end else begin
+            s1_cur_eff = s1_cur_w;
+        end
+    end
+
+    // Combinational stage-1 nxt. Driven from s1_cur_eff (bypass-forwarded),
+    // not from the raw URAM register. Drives the URAM write (via uram_sdp
+    // .wdata) and the level_evt_size pulse.
+    level_t s1_nxt_d;
+    always_comb begin
+        s1_nxt_d = '0;
         if (s1_add_q && s1_in_window_q) begin
-            s1_writing_d        = 1'b1;
             s1_nxt_d.tail       = s1_slot_q;
-            s1_nxt_d.agg_size   = s1_cur_q.agg_size + s1_shares_q;
-            s1_nxt_d.count      = s1_cur_q.count + 16'd1;
-            s1_nxt_d.head       = (s1_cur_q.count == 16'd0) ? s1_slot_q : s1_cur_q.head;
+            s1_nxt_d.agg_size   = s1_cur_eff.agg_size + s1_shares_q;
+            s1_nxt_d.count      = s1_cur_eff.count + 16'd1;
+            s1_nxt_d.head       = (s1_cur_eff.count == 16'd0) ? s1_slot_q : s1_cur_eff.head;
         end else if (s1_del_q && s1_in_window_q) begin
-            s1_writing_d        = 1'b1;
-            s1_nxt_d            = s1_cur_q;
-            s1_nxt_d.agg_size   = s1_cur_q.agg_size - s1_shares_q;
+            s1_nxt_d            = s1_cur_eff;
+            s1_nxt_d.agg_size   = s1_cur_eff.agg_size - s1_shares_q;
             if (!s1_partial_q) begin
-                s1_nxt_d.count  = s1_cur_q.count - 16'd1;
+                s1_nxt_d.count  = s1_cur_eff.count - 16'd1;
             end
         end
     end
 
-    // Stage-0 URAM read with forwarding. The read returns:
-    //   1. s1_nxt_d if stage 1 is committing a write to the same address
-    //      this cycle (covers back-to-back same-address ops, where the
-    //      bypass register's NBA hasn't fired yet);
-    //   2. bypass_data_q if the previous cycle's stage-1 write was to the
-    //      same address (covers 1-cycle-spaced same-address ops);
-    //   3. levels[a] otherwise (the URAM read).
-    //
-    // Vivado: this expression is folded into the URAM sync-read pattern
-    // because the result drives s1_cur_q via NBA in the always_ff below.
-    // The combinational forwarding muxes appear AFTER the URAM output
-    // register in the synthesised graph, so the URAM cell is inferred
-    // cleanly and the (* ram_style = "ultra" *) hint is honoured.
-    function automatic level_t read_level_d(input logic [ADDR_W-1:0] a);
-        if (s1_writing_d && (s1_addr_q == a))            return s1_nxt_d;
-        if (bypass_valid_q && (bypass_addr_q == a))      return bypass_data_q;
-        return levels[a];
-    endfunction
+    // Wrapper write enable: any in-window committed ADD or DEL in stage 1.
+    // wdata is the packed view of s1_nxt_d. The wrapper handles the actual
+    // URAM write on the clock edge.
+    assign mem_we_w    = (s1_add_q || s1_del_q) && s1_in_window_q;
+    assign mem_wdata_w = LEVEL_W'(s1_nxt_d);
 
     // ----------------------------------------------------------------------
     // Sequential pipeline.
@@ -262,7 +327,15 @@ module price_ladder
             s1_sym_idx_q    <= '0;
             s1_addr_q       <= '0;
             s1_in_window_q  <= 1'b0;
-            s1_cur_q        <= '0;
+            s1_cur_active_q <= 1'b0;
+            // Wide bit-vector reset: at production sizing (N_LEVELS = 1 M)
+            // the replication width trips Verilator's default
+            // --replication-limit. Waiver until Phase K production sizing
+            // moves level_active to URAM (with the same `initial`-based
+            // zero init as the payload mem).
+            /* verilator lint_off WIDTHCONCAT */
+            level_active_q  <= '0;
+            /* verilator lint_on WIDTHCONCAT */
             // Bypass + counter
             out_of_window_q   <= '0;
             bypass_valid_q    <= 1'b0;
@@ -281,14 +354,19 @@ module price_ladder
             read_agg_size     <= '0;
             read_count        <= '0;
             add_old_tail      <= '0;
-            for (int i = 0; i < N_SYMBOLS * 2 * WINDOW_SIZE_TICKS; i++) begin
-                levels[i].head     <= '0;
-                levels[i].tail     <= '0;
-                levels[i].agg_size <= '0;
-                levels[i].count    <= '0;
-            end
+            // NOTE: the URAM-backed levels[] storage is NOT reset here —
+            // URAM cells have no reset port, and the `for (int i = 0; ...;
+            // levels[i].field <= '0)` loop was the exact pattern that
+            // forced Vivado to per-field decompose the struct array and
+            // ignore `ram_style = "ultra"` (Synth 8-7186 ×100+). The
+            // uram_sdp wrapper handles config-time zero-init via its own
+            // `initial` block.
         end else begin
             // ---------- Stage 0: capture op + issue URAM read ----------
+            // The URAM read itself is driven by the uram_sdp instance —
+            // .re tied high, .raddr = a_d combinationally. The wrapper's
+            // .rdata is registered (1-cycle latency) and is consumed in
+            // stage 1 via s1_cur_w / s1_cur_eff.
             s1_add_q       <= add_req;
             s1_del_q       <= del_req;
             s1_read_q      <= read_req;
@@ -300,7 +378,9 @@ module price_ladder
             s1_sym_idx_q   <= op_sym_idx;
             s1_addr_q      <= a_d;
             s1_in_window_q <= in_win_d;
-            s1_cur_q       <= read_level_d(a_d);
+            // Capture the active flag for the address we're reading,
+            // synchronously alongside the URAM read.
+            s1_cur_active_q <= level_active_q[a_d];
 
             // ---------- Stage 1: commit write + emit pulses ----------
             // Defaults: pulses deassert each cycle; bypass invalidates
@@ -315,8 +395,13 @@ module price_ladder
                 if (!s1_in_window_q) begin
                     out_of_window_q <= out_of_window_q + 1'b1;
                 end else begin
-                    levels[s1_addr_q] <= s1_nxt_d;
-                    add_old_tail      <= s1_cur_q.tail;
+                    // URAM write fires via uram_sdp this cycle (mem_we_w
+                    // assigned combinationally above); capture old tail,
+                    // update the bypass forward, and mark the level
+                    // active (ADD never produces count=0, so this is
+                    // unconditionally `1`).
+                    add_old_tail      <= s1_cur_eff.tail;
+                    level_active_q[s1_addr_q] <= 1'b1;
 
                     bypass_valid_q <= 1'b1;
                     bypass_addr_q  <= s1_addr_q;
@@ -332,7 +417,7 @@ module price_ladder
                     level_evt_price   <= s1_price_q;
                     level_evt_size    <= s1_nxt_d.agg_size;
                     level_evt_sym_idx <= s1_sym_idx_q;
-                    if (s1_cur_q.count == 16'd0) begin
+                    if (s1_cur_eff.count == 16'd0) begin
                         level_now_active <= 1'b1;
                     end
                 end
@@ -340,11 +425,16 @@ module price_ladder
                 if (!s1_in_window_q) begin
                     out_of_window_q <= out_of_window_q + 1'b1;
                 end else begin
-                    levels[s1_addr_q] <= s1_nxt_d;
-
+                    // URAM write fires via uram_sdp; update the bypass
+                    // forward, and clear the level-active bit if this
+                    // DEL drove count to 0 (full removal of the last
+                    // order on this level).
                     bypass_valid_q <= 1'b1;
                     bypass_addr_q  <= s1_addr_q;
                     bypass_data_q  <= s1_nxt_d;
+                    if (!s1_partial_q && (s1_nxt_d.count == 16'd0)) begin
+                        level_active_q[s1_addr_q] <= 1'b0;
+                    end
 
                     // level_evt_* fires on EVERY in-window committed del
                     // (full or partial), not just on empty transitions.
@@ -360,10 +450,10 @@ module price_ladder
             end
 
             if (s1_read_q) begin : read_path
-                read_head     <= s1_cur_q.head;
-                read_tail     <= s1_cur_q.tail;
-                read_agg_size <= s1_cur_q.agg_size;
-                read_count    <= s1_cur_q.count;
+                read_head     <= s1_cur_eff.head;
+                read_tail     <= s1_cur_eff.tail;
+                read_agg_size <= s1_cur_eff.agg_size;
+                read_count    <= s1_cur_eff.count;
             end
         end
     end

@@ -23,12 +23,9 @@ ITCH_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv \
                     $(wildcard $(REPO_ROOT)/hw/ip/itch_decoder/*.sv)) \
                 $(REPO_ROOT)/hw/ip/itch_decoder/itch_decoder.sv
 
-LOB_SOURCES := $(REPO_ROOT)/hw/ip/lob_core/lob_core_params_pkg.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/order_pool.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/order_id_hash.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/price_ladder.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/tob_tracker.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/lob_core.sv
+# Pull canonical lob_core source list from hw/ip/lob_core/files.f.
+LOB_DIR     := $(REPO_ROOT)/hw/ip/lob_core
+LOB_SOURCES := $(addprefix $(LOB_DIR)/,$(shell grep -vE '^[[:space:]]*(\#|$$)' $(LOB_DIR)/files.f))
 
 VERILOG_SOURCES := $(ITCH_SOURCES) $(LOB_SOURCES) \
                    $(REPO_ROOT)/dv/integration/m05_cosim/decoder_lob_top.sv
