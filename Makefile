@@ -7,7 +7,7 @@ VIVADO ?= vivado
         itch-decoder-codegen-check itch-decoder-test itch-decoder-lint \
         lob-core-test lob-core-lint lob-core-synth \
         m04-cosim-slice verify-goldens m06-exit \
-        m06-pick-symbols m06-estimate-leak m06-hash-sim
+        m06-pick-symbols m06-estimate-leak m06-hash-sim m06-gen-slice
 
 help:
 	@echo "Nanobook — available targets:"
@@ -30,6 +30,7 @@ help:
 	@echo "  lob-core-lint      Verilator lint of lob_core RTL (M05)"
 	@echo "  lob-core-synth     Vivado OOC synth for lob_core (Phase K)"
 	@echo "  m04-cosim-slice    Run M04 cosim against committed 100 K-msg slices (Phase G+)"
+	@echo "  m06-gen-slice      Filter 2019-03-27 to picked-100 stock_locates (Phase H)"
 	@echo "  clean          Remove build artifacts"
 
 shell:
@@ -67,6 +68,15 @@ m06-hash-sim:
 	    --events data/golden/2019-03-27.events.bin \
 	    --mem hw/ip/lob_core/lob_core_sym_init.mem \
 	    --hash-slots 32768
+
+# M06 multi-symbol cosim slice: filter 2019-03-27 to the picked-100
+# stock_locates (set by m06-pick-symbols). Output landing path is the
+# default M06_SLICE_ITCH that dv/integration/m06_cosim/run_slice.sh
+# falls back to.
+m06-gen-slice:
+	python3 -m sw.m06_tools.gen_m06_slice \
+	    data/pcaps/03272019.NASDAQ_ITCH50.gz \
+	    data/pcaps/slices/m06_2019-03-27_picked100.itch.zst
 
 verify-pcaps:
 	cd data/pcaps && sha256sum --check checksums.sha256

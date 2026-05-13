@@ -74,6 +74,12 @@ data/pcaps/*.pcap
 data/pcaps/*.gz
 data/pcaps/*.NASDAQ_ITCH50
 
+# M06 multi-symbol cosim slices — regenerable via `make m06-gen-slice`
+# from the source NASDAQ_ITCH50.gz, so the .zst output is not committed
+# (the M05 single-symbol slice IS committed for cosim convenience because
+# it's only 1 MB; the M06 multi-symbol slice is ~19 MB).
+data/pcaps/slices/m06_*.itch.zst
+
 # M05 goldens — derived from m04_exit.sh 10M-msg sweep, regeneratable.
 # checksums.sha256 IS committed (force-added) so verify-goldens has a
 # pinned reference; the .events.bin payloads themselves (~300 MB each)
