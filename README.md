@@ -16,17 +16,21 @@ Full architecture: [`docs/design.md`](docs/design.md).
 
 ## Status
 
-**Month 3 of 12 — complete.** Next: M04 (decoder validated on real pcaps).
+**Month 6 of 12 — in progress.** M06 Phase J synth closed at WNS = +0.080 ns;
+Phase H (multi-symbol cosim) and Phase L (full-day exit gate) are next.
 
 | Month | Scope | Status |
 | --- | --- | --- |
 | M01 | Toolchain, shell bitstream (XDMA + HBM + 10G), BAR0 freeze | done |
 | M02 | C++17 reference book + pybind11 + synthetic ITCH generator | done |
 | M03 | `itch_decoder` (MoldUDP64 + ITCH 5.0 → `book_event_t`), Vivado OOC at 400 MHz | done |
-| M04 | Real-pcap regression: RTL output bit-exact vs Python ITCH parser on 3 pinned NASDAQ captures | next |
+| M04 | Real-pcap regression: RTL output bit-exact vs Python ITCH parser on 3 pinned NASDAQ captures | done |
+| M05 | `lob_core` v1 — single-symbol L3 book on URAM (order_pool, order_id_hash, price_ladder, tob_tracker) | done |
+| M06 | Multi-symbol (100-sym) book + sliding-window rebase + pipelined CLZ + URAM synth at 250 MHz | in progress |
+| M07 | HBM-backed `order_pool` extension (≥ 100 K live orders) | next |
 
 End-of-month retrospectives live in [`docs/retrospectives/`](docs/retrospectives/).
-Not a working end-to-end system yet — `lob_core`, DMA result path, and host integration land in M05–M10.
+Not a working end-to-end system yet — DMA result path and host integration land in M08–M10.
 
 ## Architecture
 
