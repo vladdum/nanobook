@@ -145,16 +145,13 @@ lob-core-synth:
 m06-exit:
 	bash dv/integration/m06_exit.sh
 
+# Source list comes from the canonical filelist hw/ip/lob_core/files.f
+# so synth, lint, and the cocotb integration TBs stay in lock-step.
+LOB_CORE_DIR     := hw/ip/lob_core
+LOB_CORE_SOURCES := $(addprefix $(LOB_CORE_DIR)/,$(shell grep -vE '^[[:space:]]*(#|$$)' $(LOB_CORE_DIR)/files.f))
+
 lob-core-lint:
 	verilator --lint-only -Wall -Wno-DECLFILENAME \
 	  -Ihw/ip/itch_decoder -Ihw/ip/lob_core \
 	  hw/ip/itch_decoder/book_event_pkg.sv \
-	  hw/ip/lob_core/lob_core_params_pkg.sv \
-	  hw/ip/lob_core/lob_core_sym_pkg.sv \
-	  hw/ip/lob_core/sym_idx_lut.sv \
-	  hw/ip/lob_core/per_sym_state.sv \
-	  hw/ip/lob_core/order_pool.sv \
-	  hw/ip/lob_core/order_id_hash.sv \
-	  hw/ip/lob_core/price_ladder.sv \
-	  hw/ip/lob_core/tob_tracker.sv \
-	  hw/ip/lob_core/lob_core.sv
+	  $(LOB_CORE_SOURCES)

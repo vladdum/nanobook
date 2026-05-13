@@ -5,22 +5,13 @@ MODULE    := tb_lob_core_cycles_m06
 # comment in Makefile.cycles for the failure mode that bit m05_exit.sh).
 SIM_BUILD := sim_build_lob_core_cycles_m06
 
-# Mirrors Makefile.cycles' source order: book_event_pkg → lob_core_params_pkg
-# → sub-modules → top. Phase E (sym_idx_lut.sv) and Phase F (per_sym_state.sv)
-# are not yet in the list; the cycle tests here run pre-E/F. The full G.1 set
-# (test_add_rebase_5_cycles, test_stale_delete_3_cycles,
-# test_cross_sym_back_to_back_no_stall) lands after those phases.
+# Pull the canonical lob_core source list from the shared filelist.
+LOB_DIR     := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core)
+LOB_SOURCES := $(addprefix $(LOB_DIR)/,$(shell grep -vE '^[[:space:]]*(\#|$$)' $(LOB_DIR)/files.f))
+
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_sym_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/sym_idx_lut.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/per_sym_state.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
+    $(LOB_SOURCES)
 
 # Sim-only sizing. Post-E.2: SYMBOL_FILTER_ID is no longer the input filter
 # (sym_idx_lut is), so the override is dropped; package default 5754 (AAPL)

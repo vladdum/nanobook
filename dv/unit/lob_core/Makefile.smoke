@@ -2,17 +2,14 @@ TOPLEVEL := lob_core
 MODULE   := tb_lob_core_smoke
 # Phase H wires the orchestrator + 4 sub-modules; lob_core_params_pkg now
 # imports + sub-module sources are required here too.
+# Source list from the canonical lob_core filelist (one source of truth
+# shared with synth, lint, and the integration cosims).
+LOB_DIR     := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core)
+LOB_SOURCES := $(addprefix $(LOB_DIR)/,$(shell grep -vE '^[[:space:]]*(\#|$$)' $(LOB_DIR)/files.f))
+
 VERILOG_SOURCES := \
     $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/itch_decoder/book_event_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_params_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core_sym_pkg.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/sym_idx_lut.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/per_sym_state.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_pool.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/order_id_hash.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/price_ladder.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/tob_tracker.sv) \
-    $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../../../hw/ip/lob_core/lob_core.sv)
+    $(LOB_SOURCES)
 
 # Sim-time sizing: small POOL/HASH/window so the Verilator build is fast.
 # Post-E.2: SYMBOL_FILTER_ID is no longer the input filter (sym_idx_lut is),

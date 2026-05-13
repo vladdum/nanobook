@@ -20,15 +20,9 @@ MODULE   := tb_bookquake
 # book_event_t beats directly onto lob_core.s_*.
 PKG_SOURCES := $(REPO_ROOT)/hw/ip/itch_decoder/book_event_pkg.sv
 
-LOB_SOURCES := $(REPO_ROOT)/hw/ip/lob_core/lob_core_params_pkg.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/lob_core_sym_pkg.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/sym_idx_lut.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/per_sym_state.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/order_pool.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/order_id_hash.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/price_ladder.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/tob_tracker.sv \
-               $(REPO_ROOT)/hw/ip/lob_core/lob_core.sv
+# Pull canonical lob_core source list from hw/ip/lob_core/files.f.
+LOB_DIR     := $(REPO_ROOT)/hw/ip/lob_core
+LOB_SOURCES := $(addprefix $(LOB_DIR)/,$(shell grep -vE '^[[:space:]]*(\#|$$)' $(LOB_DIR)/files.f))
 
 VERILOG_SOURCES := $(PKG_SOURCES) $(LOB_SOURCES)
 
